@@ -7,6 +7,9 @@ use hal::pac;
 use panic_halt as _;
 use rp2040_hal::{self as hal, Clock};
 
+mod mech_hal;
+mod pico_drivers;
+
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
@@ -30,7 +33,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-    let sio = hal::Sio::new(pac.SIO);
+    let sio: rp2040_hal::Sio = hal::Sio::new(pac.SIO);
     let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
