@@ -1,74 +1,50 @@
 use core::cell::RefCell;
 
-use embedded_hal::i2c::{AddressMode, Error, ErrorType, I2c};
+use embedded_graphics::{
+    mono_font::{MonoTextStyle, MonoTextStyleBuilder, ascii::FONT_6X10},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    text::{Baseline, Text},
+};
+use embedded_hal_bus::i2c::RefCellDevice;
+use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
 
-const OLED_ADDRESS: u8 = 0x3C;
-
-enum OLEDControlBytes {
-    CommandFlow = 0x00,
-    DataFlow = 0x40,
-}
-
-enum OLEDCommands {
-    DisplayOff = 0xAE,
-    DisplayOn = 0xAF,
-    ChargePumpSelect = 0x8D,
-    AddressMode = 0x20,
-    ColumnRange = 0x21,
-    PageRange = 0x22,
-}
-
-enum OLEDValues {
-    ChargePumpOn = 0x14,
-    HorizontalAddressMode = 0x00,
-    VerticalAddressMode = 0x01,
-}
+type OLEDDisplay<'a, I> = Ssd1306<
+    I2CInterface<RefCellDevice<'a, I>>,
+    DisplaySize128x64,
+    BufferedGraphicsMode<DisplaySize128x64>,
+>;
 
 pub struct OLED<'a, I> {
-    i2c: &'a RefCell<I>,
+    display: OLEDDisplay<'a, I>,
+    text_style: MonoTextStyle<'a, BinaryColor>
 }
 
 impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
-    fn send_command(
-        &mut self,
-        command: OLEDCommands,
-        values: &[u8],
-    ) -> Result<(), <I as ErrorType>::Error> {
-        let mut buf = [0u8; 8];
-        buf[0] = OLEDControlBytes::CommandFlow as u8;
-        buf[1] = command as u8;
-        let len = 2 + values.len();
-        buf[2..len].copy_from_slice(values);
-        self.i2c.borrow_mut().write(OLED_ADDRESS, &buf)
-    }
-
-    fn send_data(&mut self, values: &[u8]) -> Result<(), <I as ErrorType>::Error> {
-        let mut buf = [0u8; 8];
-        buf[0] = OLEDControlBytes::DataFlow as u8;
-        let len = 1 + values.len();
-        buf[1..len].copy_from_slice(values);
-        self.i2c.borrow_mut().write(OLED_ADDRESS, &buf)
-    }
-
     pub fn new(i2c: &'a RefCell<I>) -> Self {
-        // Turn on charge pump
-        let mut oled = Self { i2c };
+        let interface = I2CDisplayInterface::new(RefCellDevice::new(i2c));
+        
+        let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+            .into_buffered_graphics_mode();
+        display.init().unwrap();
 
-        oled.send_command(OLEDCommands::DisplayOff, &[]).unwrap();
-        oled.send_command(
-            OLEDCommands::ChargePumpSelect,
-            &[OLEDValues::ChargePumpOn as u8],
-        )
-        .unwrap();
-        oled.send_command(
-            OLEDCommands::AddressMode,
-            &[OLEDValues::HorizontalAddressMode as u8],
-        )
-        .unwrap();
-        oled.send_command(OLEDCommands::ColumnRange, &[0, 127])
-            .unwrap();
-        oled.send_command(OLEDCommands::PageRange, &[0, 7]).unwrap();
-        oled.send_command(OLEDCommands::DisplayOn, &[]).unwrap();
-        oled
+        let text_style = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(BinaryColor::On)
+            .build();
+
+        display.flush().unwrap();
+
+        Self { display, text_style }
     }
+
+    pub fn write_text(&mut self, text: &'a str, position: Point)
+    {
+        Text::with_baseline(text, position, self.text_style, Baseline::Top)
+            .draw(&mut self.display)
+            .unwrap();
+
+        self.display.flush().unwrap();
+    }
+    
 }

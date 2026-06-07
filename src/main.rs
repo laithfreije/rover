@@ -4,12 +4,13 @@
 use core::cell::RefCell;
 
 use cortex_m_rt::entry;
+use embedded_graphics::geometry::Point;
 use embedded_hal::digital::OutputPin;
 use hal::pac;
 use panic_halt as _;
 use rp2040_hal::{self as hal, fugit, Clock, I2C};
 
-use crate::drivers::oled::OLED;
+use crate::drivers::oled::{OLED};
 
 mod drivers;
 
@@ -57,7 +58,9 @@ fn main() -> ! {
 
     let refcell_i2c = RefCell::new(i2c_bus);
 
-    let oled_driver = OLED::new(&refcell_i2c);
+    let mut oled_driver = OLED::new(&refcell_i2c);
+
+    oled_driver.write_text("New text", Point::new(0, 16));
 
     loop {
         led.set_high().unwrap();
