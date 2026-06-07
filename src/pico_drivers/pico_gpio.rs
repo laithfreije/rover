@@ -22,19 +22,19 @@ impl PicoGPIO{
 }
 
 impl MechGPIO for PicoGPIO {
-    fn set_output(self, num: u8, is_output: bool) -> Result<(), crate::mech_hal::mech_gpio::GPIOError> {
+    fn set_output(&mut self, num: u8, is_output: bool) -> Result<(), crate::mech_hal::mech_gpio::GPIOError> {
         todo!()
     }
 
-    fn set_level(self, num: u8, is_high: bool) -> Result<(), crate::mech_hal::mech_gpio::GPIOError> {
+    fn set_level(&mut self, num: u8, is_high: bool) -> Result<(), crate::mech_hal::mech_gpio::GPIOError> {
         todo!()
     }
 
-    fn get_level(self, num: u8) -> Result<bool, crate::mech_hal::mech_gpio::GPIOError> {
+    fn get_level(&mut self, num: u8) -> Result<bool, crate::mech_hal::mech_gpio::GPIOError> {
         todo!()
     }
 
-    fn set_function(self, num: u8, function: crate::mech_hal::mech_gpio::MechGPIOFunc) -> Result<(), crate::mech_hal::mech_gpio::GPIOError> {
+    fn set_function(&mut self, num: u8, function: crate::mech_hal::mech_gpio::MechGPIOFunc) -> Result<(), crate::mech_hal::mech_gpio::GPIOError> {
         todo!()
     }
 }

@@ -1,11 +1,15 @@
 #![no_std]
 #![no_main]
 
+use core::cell::RefCell;
+
 use cortex_m_rt::entry;
 use embedded_hal::digital::OutputPin;
 use hal::pac;
 use panic_halt as _;
 use rp2040_hal::{self as hal, Clock};
+
+use crate::{mech_hal::mech_gpio::MechGPIO, pico_drivers::pico_gpio::PicoGPIO};
 
 mod mech_hal;
 mod pico_drivers;
@@ -33,18 +37,15 @@ fn main() -> ! {
     .ok()
     .unwrap();
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-    let sio: rp2040_hal::Sio = hal::Sio::new(pac.SIO);
-    let pins = hal::gpio::Pins::new(
-        pac.IO_BANK0,
-        pac.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut pac.RESETS,
-    );
-    let mut led = pins.gpio25.into_push_pull_output();
+
+    let pico_gpio: RefCell<PicoGPIO> = RefCell::new(PicoGPIO::new(pac.SIO, pac.IO_BANK0, pac.PADS_BANK0, &mut pac.RESETS));
+       
+    pico_gpio.borrow_mut().set_output(25, true).unwrap();
+
     loop {
-        led.set_high().unwrap();
+        pico_gpio.borrow_mut().set_level(25, true).unwrap();
         delay.delay_ms(500);
-        led.set_low().unwrap();
+        pico_gpio.borrow_mut().set_level(25, false).unwrap();
         delay.delay_ms(500);
     }
 }
