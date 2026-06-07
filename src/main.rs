@@ -4,7 +4,6 @@
 use core::cell::RefCell;
 
 use cortex_m_rt::entry;
-use embedded_graphics::geometry::Point;
 use embedded_hal::digital::OutputPin;
 use hal::pac;
 use panic_halt as _;
@@ -60,7 +59,9 @@ fn main() -> ! {
 
     let mut oled_driver = OLED::new(&refcell_i2c);
 
-    oled_driver.write_text("New text", Point::new(0, 16));
+    oled_driver.write_text("New text", 0, 0);
+
+    oled_driver.write_text("Other text", 64, 128);
 
     loop {
         led.set_high().unwrap();

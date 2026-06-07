@@ -38,13 +38,13 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
         Self { display, text_style }
     }
 
-    pub fn write_text(&mut self, text: &'a str, position: Point)
+    pub fn write_text(&mut self, text: &'a str, x: i32, y: i32)
     {
-        Text::with_baseline(text, position, self.text_style, Baseline::Top)
+        Text::with_baseline(text, Point::new(x, y), self.text_style, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
 
         self.display.flush().unwrap();
     }
-    
+
 }
