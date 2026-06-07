@@ -10,6 +10,7 @@ use panic_halt as _;
 use rp2040_hal::{self as hal, fugit, Clock, I2C};
 
 use crate::drivers::oled::{OLED};
+use core::fmt::Write;   // <-- this line
 
 mod drivers;
 
@@ -59,9 +60,17 @@ fn main() -> ! {
 
     let mut oled_driver = OLED::new(&refcell_i2c);
 
-    oled_driver.write_text("New text", 0, 0);
+    for row in (0..64).step_by(8) {
+        let mut buf_row: heapless::String<16> = heapless::String::new();
+        write!(buf_row, "{:x}", row/8).unwrap();
+        oled_driver.write_text(buf_row.as_str(), 0, row);
 
-    oled_driver.write_text("Other text", 64, 128);
+        for col in (8..128).step_by(8) {
+            let mut buf: heapless::String<16> = heapless::String::new();
+            write!(buf, "{:x}", col/8).unwrap();
+            oled_driver.write_text(buf.as_str(), col, row);
+        }
+    }
 
     loop {
         led.set_high().unwrap();

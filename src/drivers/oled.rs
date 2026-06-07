@@ -1,12 +1,13 @@
 use core::cell::RefCell;
 
 use embedded_graphics::{
-    mono_font::{MonoTextStyle, MonoTextStyleBuilder, ascii::FONT_6X10},
+    mono_font::{MonoTextStyle, MonoTextStyleBuilder},
     pixelcolor::BinaryColor,
     prelude::*,
     text::{Baseline, Text},
 };
 use embedded_hal_bus::i2c::RefCellDevice;
+use ibm437::IBM437_8X8_REGULAR;
 use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
 
 type OLEDDisplay<'a, I> = Ssd1306<
@@ -29,7 +30,7 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
         display.init().unwrap();
 
         let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
+            .font(&IBM437_8X8_REGULAR)
             .text_color(BinaryColor::On)
             .build();
 
@@ -38,7 +39,7 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
         Self { display, text_style }
     }
 
-    pub fn write_text(&mut self, text: &'a str, x: i32, y: i32)
+    pub fn write_text(&mut self, text: &str, x: i32, y: i32)
     {
         Text::with_baseline(text, Point::new(x, y), self.text_style, Baseline::Top)
             .draw(&mut self.display)
