@@ -3,23 +3,29 @@
 
 use core::cell::RefCell;
 
+use cortex_m::interrupt::Mutex;
 use cortex_m_rt::entry;
 use embedded_hal::digital::OutputPin;
 use hal::pac;
 use panic_halt as _;
-use rp2040_hal::{self as hal, fugit, Clock, I2C};
+use rp2040_hal::{self as hal, Clock, I2C, fugit::{self, ExtU32}, gpio::{FunctionSioInput, Pin, PullUp, bank0::Gpio5}, timer::{Alarm, Alarm0}};
 
-use crate::drivers::oled::{OLED};
+use crate::{control::irsensor::{IRSensor, SAMPLE_HZ}, drivers::oled::OLED};
 use core::fmt::Write;   // <-- this line
 
 mod drivers;
+mod control;
 
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
+static IR: Mutex<RefCell<Option<(IRSensor, IrPin, Alarm0)>>> = Mutex::new(RefCell::new(None));
+
 const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
 const I2C_BUS_FREQUENCY_KHZ: u32 = 100;
+
+type IrPin = Pin<Gpio5, FunctionSioInput, PullUp>;
 
 #[entry]
 fn main() -> ! {
@@ -60,17 +66,20 @@ fn main() -> ! {
 
     let mut oled_driver = OLED::new(&refcell_i2c);
 
-    for row in (0..64).step_by(8) {
-        let mut buf_row: heapless::String<16> = heapless::String::new();
-        write!(buf_row, "{:x}", row/8).unwrap();
-        oled_driver.write_text(buf_row.as_str(), 0, row);
+    let mut timer = rp2040_hal::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let mut alarm = timer.alarm_0().unwrap();
+    let ir_pin: IrPin = pins.gpio5.reconfigure();
 
-        for col in (8..128).step_by(8) {
-            let mut buf: heapless::String<16> = heapless::String::new();
-            write!(buf, "{:x}", col/8).unwrap();
-            oled_driver.write_text(buf.as_str(), col, row);
-        }
-    }
+    let ir = IRSensor::new();
+
+    alarm.schedule((1_000_000 / SAMPLE_HZ).micros()).unwrap();
+    alarm.enable_interrupt();
+
+    critical_section::with(|cs| {
+        IR.borrow(cs).replace(Some((ir, ir_pin, alarm)));
+    });
+
+    unsafe { pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0); }
 
     loop {
         led.set_high().unwrap();

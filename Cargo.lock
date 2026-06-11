@@ -332,6 +332,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "infrared"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "178d1045554b6f52df07656403f4cbd316b480f673ed97cb726b34504f94bbed"
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -570,12 +576,15 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "critical-section",
  "embedded-graphics",
  "embedded-hal 1.0.0",
  "embedded-hal-bus",
  "heapless 0.9.3",
  "ibm437",
+ "infrared",
  "panic-halt",
+ "pio",
  "rp2040-boot2",
  "rp2040-hal",
  "ssd1306",

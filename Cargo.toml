@@ -12,6 +12,9 @@ embedded-hal-bus = "0.3.0"
 heapless = "0.9.3"
 ibm437 = "0.4.0"
 panic-halt = "0.2" 
+pio = "0.2" 
 rp2040-boot2 = "0.3" 
 rp2040-hal = { version = "0.11", features = ["rt", "critical-section-impl"] } 
 ssd1306 = "0.10.0"
+infrared = { version = "0.14", default-features = false, features = ["nec"] }
+critical-section = "1.2.0"

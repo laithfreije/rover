@@ -18,13 +18,13 @@ type OLEDDisplay<'a, I> = Ssd1306<
 
 pub struct OLED<'a, I> {
     display: OLEDDisplay<'a, I>,
-    text_style: MonoTextStyle<'a, BinaryColor>
+    text_style: MonoTextStyle<'a, BinaryColor>,
 }
 
 impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
     pub fn new(i2c: &'a RefCell<I>) -> Self {
         let interface = I2CDisplayInterface::new(RefCellDevice::new(i2c));
-        
+
         let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
             .into_buffered_graphics_mode();
         display.init().unwrap();
@@ -36,16 +36,17 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
 
         display.flush().unwrap();
 
-        Self { display, text_style }
+        Self {
+            display,
+            text_style,
+        }
     }
 
-    pub fn write_text(&mut self, text: &str, x: i32, y: i32)
-    {
+    pub fn write_text(&mut self, text: &str, x: i32, y: i32) {
         Text::with_baseline(text, Point::new(x, y), self.text_style, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
 
         self.display.flush().unwrap();
     }
-
 }
