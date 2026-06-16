@@ -10,7 +10,7 @@
 use core::fmt::Write as _;
 
 use cyw43::{aligned_bytes, Control, JoinOptions};
-use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
+use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use embassy_executor::Spawner;
 use embassy_net::{Config, StackResources};
 use embassy_rp::gpio::{Level, Output};
@@ -58,7 +58,7 @@ const NET_SEED: u64 = 0x0123_4567_89ab_cdef;
 const RSSI_ROW: i32 = 3;
 
 /// How often the RSSI reading is refreshed.
-const RSSI_POLL_SECS: u64 = 2;
+const RSSI_POLL_SECS: u64 = 1;
 
 /// Background task that drives the cyw43 SPI runner. Must run for the
 /// network stack to make progress.
@@ -80,6 +80,7 @@ async fn network_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<
 /// no locking is required to call its `&mut self` methods.
 #[embassy_executor::task]
 async fn rssi_task(mut control: Control<'static>, oled: &'static SharedOled) -> ! {
+    let mut enable_state = false;
     loop {
         // Flip to positive to get magnitude
         let rssi = -control.get_rssi().await;
@@ -105,6 +106,8 @@ async fn rssi_task(mut control: Control<'static>, oled: &'static SharedOled) -> 
             display.write_text(&line, 0, RSSI_ROW);
         });
 
+        enable_state = !enable_state;
+        control.gpio_set(0, enable_state).await;
         Timer::after_secs(RSSI_POLL_SECS).await;
     }
 }
