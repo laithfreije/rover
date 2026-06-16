@@ -49,4 +49,12 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
 
         self.display.flush().unwrap();
     }
+
+    /// Blank the whole panel. Drawing is additive (the buffered mode never
+    /// erases stale pixels on its own), so call this before repainting a
+    /// shorter string over a longer one.
+    pub fn clear(&mut self) {
+        self.display.clear(BinaryColor::Off).unwrap();
+        self.display.flush().unwrap();
+    }
 }

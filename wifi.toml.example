@@ -1,0 +1,4 @@
+# Copy this file to wifi.toml and fill in your network credentials.
+# wifi.toml is gitignored and read at build time by build.rs.
+ssid = "your-network-ssid"
+password = "your-network-password"

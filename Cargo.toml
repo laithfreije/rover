@@ -1,20 +1,36 @@
-[package] 
-name = "rp2040-min" 
-version = "0.1.0" 
-edition = "2021" 
- 
-[dependencies] 
-cortex-m = "0.7" 
-cortex-m-rt = "0.7" 
+[package]
+name = "rp2040-min"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+cortex-m-rt = "0.7.5"
+panic-halt = "0.2"
+critical-section = "1.2.0"
+portable-atomic = { version = "1.5", features = ["critical-section"] }
+static_cell = "2.1"
+fixed = "1.23.1"
+
+# OLED / graphics
 embedded-graphics = "0.8.2"
-embedded-hal = "1.0" 
+embedded-hal = "1.0"
 embedded-hal-bus = "0.3.0"
 heapless = "0.9.3"
 ibm437 = "0.4.0"
-panic-halt = "0.2" 
-pio = "0.2" 
-rp2040-boot2 = "0.3" 
-rp2040-hal = { version = "0.11", features = ["rt", "critical-section-impl"] } 
 ssd1306 = "0.10.0"
-infrared = { version = "0.14", default-features = false, features = ["nec"] }
-critical-section = "1.2.0"
+
+# Embassy async runtime + RP2040 HAL
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-time = { version = "0.5.1" }
+embassy-rp = { version = "0.10.0", features = ["unstable-pac", "time-driver", "critical-section-impl", "rp2040"] }
+embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "proto-ipv4"] }
+
+# CYW43 wireless chip (Pico W)
+cyw43 = { version = "0.7.0" }
+cyw43-pio = { version = "0.10.0" }
+
+[build-dependencies]
+
+[profile.release]
+panic = "abort"
