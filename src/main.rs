@@ -37,6 +37,10 @@ fn panic(_info: &PanicInfo) -> ! {
 use crate::drivers::oled::OLED;
 
 mod drivers;
+
+#[cfg(feature = "bluetooth")]
+mod bluetooth;
+#[cfg(feature = "wifi")]
 mod wireless;
 
 const RESET_REASON_ROW: i32 = 0;
@@ -106,9 +110,11 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(power_task(shared_oled).unwrap());
 
-    // Bring up the wireless chip and join the network. Returns the IP
-    // address (or a failure reason) ready to display.
-    let status = wireless::init(
+    // Bring up the cyw43 chip. The Bluetooth and Wi-Fi paths are mutually
+    // exclusive for now (see Cargo.toml `[features]`); exactly one runs.
+
+    #[cfg(feature = "bluetooth")]
+    bluetooth::run(
         spawner,
         p.PIN_23,
         p.PIN_24,
@@ -116,17 +122,34 @@ async fn main(spawner: Spawner) {
         p.PIN_29,
         p.PIO0,
         p.DMA_CH0,
+        p.DMA_CH1,
         shared_oled,
     )
     .await;
 
-    shared_oled.lock(|o| {
-        let mut oled = o.borrow_mut();
-        oled.clear_row(IP_ROW);
-        oled.write_text(status.as_str(), 0, IP_ROW);
-    });
+    // Join the network and display the acquired IP (or a failure reason).
+    #[cfg(feature = "wifi")]
+    {
+        let status = wireless::init(
+            spawner,
+            p.PIN_23,
+            p.PIN_24,
+            p.PIN_25,
+            p.PIN_29,
+            p.PIO0,
+            p.DMA_CH0,
+            shared_oled,
+        )
+        .await;
 
-    loop {
-        Timer::after_secs(1).await;
+        shared_oled.lock(|o| {
+            let mut oled = o.borrow_mut();
+            oled.clear_row(IP_ROW);
+            oled.write_text(status.as_str(), 0, IP_ROW);
+        });
+
+        loop {
+            Timer::after_secs(1).await;
+        }
     }
 }
