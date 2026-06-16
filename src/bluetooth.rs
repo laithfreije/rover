@@ -4,12 +4,13 @@
 //! with, and read HID reports from an Xbox Wireless Controller (which presents
 //! as a HID-over-GATT peripheral over BLE).
 //!
-//! This commit performs the bring-up: it powers the cyw43 over PIO-SPI with
-//! Bluetooth firmware loaded, hands its HCI controller to trouble-host, builds
-//! the BLE host stack, and runs the host runner. Scanning/bonding/HID land in
-//! following commits.
+//! This commit discovers a controller by *name* (any device advertising
+//! "xbox", so any Xbox controller works — no hardcoded address), connects to
+//! it, and performs the BLE pairing/bond. An Xbox controller won't deliver HID
+//! reports until the link is encrypted, so bonding is a prerequisite for the
+//! report-reading step that follows.
 
-use core::cell::RefCell;
+use core::cell::Cell;
 use core::fmt::Write as _;
 
 use cyw43::{aligned_bytes, Cyw43439};
@@ -20,26 +21,19 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::{bind_interrupts, dma, Peri};
-use embassy_time::{Duration, Timer};
-use heapless::{Deque, String};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{with_timeout, Duration, Timer};
+use heapless::String;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
 use crate::SharedOled;
 
-/// OLED row (8px units) where Bluetooth status is drawn. Mirrors the row the
-/// Wi-Fi build used for its IP/connection line.
+/// OLED row (8px units) where the Bluetooth connection state is drawn.
 const BT_STATUS_ROW: i32 = 2;
-
-/// OLED row reserved for a found Xbox controller (its MAC).
+/// OLED row showing the discovered controller's MAC.
 const XBOX_ROW: i32 = 3;
-
-/// OLED rows used to list other named BLE devices (one per line, wrapping).
-const DEVICE_ROW_FIRST: i32 = 4;
-const DEVICE_ROW_LAST: i32 = 7;
-
-/// Max distinct devices remembered for de-duplication while scanning.
-const SEEN_MAX: usize = 32;
 
 /// OLED width in 8x8 characters (128px / 8).
 const OLED_COLS: usize = 16;
@@ -49,6 +43,10 @@ const OLED_COLS: usize = 16;
 /// little headroom.
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 3;
+
+/// How long to hunt for a controller before giving up (it must be in pairing
+/// mode and advertising).
+const DISCOVER_TIMEOUT_SECS: u64 = 30;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
@@ -66,8 +64,9 @@ async fn cyw43_task(
     runner.run().await
 }
 
-/// Bring up the cyw43 Bluetooth controller and run the trouble-host BLE stack.
-/// Never returns.
+/// Bring up the cyw43 Bluetooth controller, discover an Xbox controller by
+/// name, connect, and bond. Never returns.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     spawner: Spawner,
     pwr_pin: Peri<'static, PIN_23>,
@@ -108,7 +107,6 @@ pub async fn run(
     spawner.spawn(cyw43_task(cyw43_runner).unwrap());
     control.init(clm).await;
 
-    // Hand the chip's HCI interface to trouble-host as an external controller.
     let controller: ExternalController<_, 10> = ExternalController::new(bt_device);
 
     // Fixed random BLE address for the MCU acting as central. A shipping
@@ -122,75 +120,109 @@ pub async fn run(
         .set_random_address(address)
         .build();
     let mut runner = stack.runner();
-    let central = stack.central();
 
-    oled.lock(|o| {
-        let mut o = o.borrow_mut();
-        o.clear_row(BT_STATUS_ROW);
-        o.write_text("BT: scanning", 0, BT_STATUS_ROW);
-    });
+    // Address of a discovered controller, handed from the (synchronous) scan
+    // event handler to the async connect logic below.
+    let found: Signal<CriticalSectionRawMutex, Address> = Signal::new();
+    let finder = XboxFinder::new(oled, &found);
 
-    // Active scan so peripherals send scan responses (which usually carry the
-    // device name). Discovered devices are routed to `DeviceList`, which prints
-    // each new one to the OLED. `run_with_handler` drives the host stack and
-    // delivers advertising reports to the handler; it must run for scanning to
-    // make progress.
-    let devices = DeviceList::new(oled);
-    let mut scanner = Scanner::new(central);
-    let _ = join(runner.run_with_handler(&devices), async {
-        let mut config = ScanConfig::default();
-        config.active = true;
-        config.phys = PhySet::M1;
-        config.interval = Duration::from_secs(1);
-        config.window = Duration::from_secs(1);
-        let _session = scanner.scan(&config).await.unwrap();
-        // Keep the scan session alive; the handler does the work.
+    set_status(oled, "BT: finding");
+
+    // `run_with_handler` drives the host stack (including the one-time security
+    // RNG seeding via the controller's LE_Rand) and routes advertising reports
+    // to `finder`. It must run for scanning, connecting and pairing to make
+    // progress, so everything else happens in the joined async block.
+    let _ = join(runner.run_with_handler(&finder), async {
+        // --- Discover: active scan until a device named "xbox" shows up. ---
+        let central = stack.central();
+        let mut scanner = Scanner::new(central);
+        let target = {
+            let mut config = ScanConfig::default();
+            config.active = true;
+            config.phys = PhySet::M1;
+            config.interval = Duration::from_secs(1);
+            config.window = Duration::from_secs(1);
+            let _session = match scanner.scan(&config).await {
+                Ok(s) => s,
+                Err(_) => {
+                    set_status(oled, "BT: scan err");
+                    return;
+                }
+            };
+            match with_timeout(Duration::from_secs(DISCOVER_TIMEOUT_SECS), found.wait()).await {
+                Ok(addr) => addr,
+                Err(_) => {
+                    set_status(oled, "BT: no xbox");
+                    return;
+                }
+            }
+            // `_session` dropped here -> scanning stops, freeing the scanner.
+        };
+
+        // --- Connect: hand the scanner's central back and dial the target. ---
+        let mut central = scanner.into_inner();
+        set_status(oled, "CONNECTING");
+        let connect_config = ConnectConfig {
+            connect_params: Default::default(),
+            scan_config: ScanConfig {
+                active: true,
+                filter_accept_list: core::slice::from_ref(&target),
+                timeout: Duration::from_secs(DISCOVER_TIMEOUT_SECS),
+                ..Default::default()
+            },
+        };
+        let conn = match central.connect(&connect_config).await {
+            Ok(c) => c,
+            Err(_) => {
+                set_status(oled, "CONNECT ERR");
+                return;
+            }
+        };
+        set_status(oled, "CONNECTED");
+
+        // --- Bond: request an encrypted link. The Xbox controller pairs with
+        // Just Works (no passkey); the controller won't serve HID reports until
+        // the link is encrypted. Keep pumping events so the connection stays
+        // alive after bonding. ---
+        let _ = conn.set_bondable(true);
+        if conn.request_security().is_err() {
+            set_status(oled, "SEC REQ ERR");
+            return;
+        }
+        set_status(oled, "PAIRING...");
         loop {
-            Timer::after_secs(1).await;
+            match conn.next().await {
+                ConnectionEvent::PairingComplete { .. } => set_status(oled, "BONDED"),
+                ConnectionEvent::PairingFailed(_) => {
+                    set_status(oled, "PAIR FAIL");
+                    break;
+                }
+                ConnectionEvent::Disconnected { .. } => {
+                    set_status(oled, "DISCONNECTED");
+                    break;
+                }
+                ConnectionEvent::RequestConnectionParams(req) => {
+                    let _ = req.accept(None, &stack).await;
+                }
+                _ => {}
+            }
         }
     })
     .await;
 
-    oled.lock(|o| {
-        let mut o = o.borrow_mut();
-        o.clear_row(BT_STATUS_ROW);
-        o.write_text("BT: runner died", 0, BT_STATUS_ROW);
-    });
+    set_status(oled, "BT: runner died");
     loop {
         Timer::after_secs(1).await;
     }
 }
 
-/// Scan-result sink. Only devices that advertise a local name are shown (most
-/// of the BLE noise around us advertises no name, and showing every MAC floods
-/// the panel). A device named like an Xbox controller is called out on its own
-/// fixed rows; other named devices cycle through the remaining rows.
-///
-/// De-duplication keys on "already displayed with a name" rather than "address
-/// seen", so a device's scan response (which carries the name) still gets shown
-/// even though its earlier, nameless `ADV_IND` was seen first.
-struct DeviceList {
-    oled: &'static SharedOled,
-    inner: RefCell<DeviceListInner>,
-}
-
-struct DeviceListInner {
-    named: Deque<BdAddr, SEEN_MAX>,
-    next_row: i32,
-    xbox_shown: bool,
-}
-
-impl DeviceList {
-    fn new(oled: &'static SharedOled) -> Self {
-        Self {
-            oled,
-            inner: RefCell::new(DeviceListInner {
-                named: Deque::new(),
-                next_row: DEVICE_ROW_FIRST,
-                xbox_shown: false,
-            }),
-        }
-    }
+/// Write a short status line on [`BT_STATUS_ROW`], clearing the row first.
+fn set_status(oled: &'static SharedOled, msg: &str) {
+    oled.lock(|o| {
+        let mut o = o.borrow_mut();
+        o.clear_row(BT_STATUS_ROW);
+        o.write_text(msg, 0, BT_STATUS_ROW);
+    });
 }
 
 /// Case-insensitive substring test for "xbox" in an advertised name.
@@ -201,74 +233,72 @@ fn is_xbox_name(name: &str) -> bool {
         .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
-impl EventHandler for DeviceList {
+/// Does this advertising payload carry a local name containing "xbox"?
+fn adv_is_xbox(data: &[u8]) -> bool {
+    for ad in AdStructure::decode(data) {
+        let bytes = match ad {
+            Ok(AdStructure::CompleteLocalName(n)) | Ok(AdStructure::ShortenedLocalName(n)) => n,
+            _ => continue,
+        };
+        if let Ok(s) = core::str::from_utf8(bytes) {
+            if is_xbox_name(s) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Scan-result sink that watches for any Xbox controller (matched by advertised
+/// name, so any unit works) and hands its address — with the correct address
+/// kind — to the connect logic via a [`Signal`].
+struct XboxFinder<'a> {
+    oled: &'static SharedOled,
+    found: &'a Signal<CriticalSectionRawMutex, Address>,
+    done: Cell<bool>,
+}
+
+impl<'a> XboxFinder<'a> {
+    fn new(oled: &'static SharedOled, found: &'a Signal<CriticalSectionRawMutex, Address>) -> Self {
+        Self {
+            oled,
+            found,
+            done: Cell::new(false),
+        }
+    }
+}
+
+impl EventHandler for XboxFinder<'_> {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
-        let mut inner = self.inner.borrow_mut();
+        if self.done.get() {
+            return;
+        }
         while let Some(Ok(report)) = it.next() {
-            let addr = report.addr;
-
-            // Extract the advertised local name, if any. Skip nameless reports.
-            let mut name: String<OLED_COLS> = String::new();
-            let mut has_name = false;
-            for ad in AdStructure::decode(report.data) {
-                let bytes = match ad {
-                    Ok(AdStructure::CompleteLocalName(n)) | Ok(AdStructure::ShortenedLocalName(n)) => n,
-                    _ => continue,
-                };
-                has_name = true;
-                if let Ok(s) = core::str::from_utf8(bytes) {
-                    for c in s.chars() {
-                        if name.push(c).is_err() {
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-            if !has_name {
+            if !adv_is_xbox(report.data) {
                 continue;
             }
+            self.done.set(true);
 
-            // Only show each named device once.
-            if inner.named.iter().any(|b| b.raw() == addr.raw()) {
-                continue;
-            }
-            if inner.named.is_full() {
-                inner.named.pop_front();
-            }
-            let _ = inner.named.push_back(addr);
-
-            if is_xbox_name(&name) && !inner.xbox_shown {
-                inner.xbox_shown = true;
-                let m = addr.raw();
-                let mut mac: String<OLED_COLS> = String::new();
-                let _ = write!(
-                    mac,
-                    "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    m[5], m[4], m[3], m[2], m[1], m[0]
-                );
-                self.oled.lock(|o| {
-                    let mut o = o.borrow_mut();
-                    o.clear_row(BT_STATUS_ROW);
-                    o.write_text("FOUND XBOX", 0, BT_STATUS_ROW);
-                    o.clear_row(XBOX_ROW);
-                    o.write_text(&mac, 0, XBOX_ROW);
-                });
-                continue;
-            }
-
-            // Other named device: print on the next cycling row.
-            let row = inner.next_row;
-            inner.next_row = if row >= DEVICE_ROW_LAST {
-                DEVICE_ROW_FIRST
-            } else {
-                row + 1
-            };
+            let m = report.addr.raw();
+            let mut mac: String<OLED_COLS> = String::new();
+            let _ = write!(
+                mac,
+                "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                m[5], m[4], m[3], m[2], m[1], m[0]
+            );
             self.oled.lock(|o| {
                 let mut o = o.borrow_mut();
-                o.clear_row(row);
-                o.write_text(&name, 0, row);
+                o.clear_row(BT_STATUS_ROW);
+                o.write_text("FOUND XBOX", 0, BT_STATUS_ROW);
+                o.clear_row(XBOX_ROW);
+                o.write_text(&mac, 0, XBOX_ROW);
             });
+
+            // Preserve the advertised address *kind* (public vs random) so the
+            // connect filter matches regardless of controller model.
+            self.found
+                .signal(Address::new(report.addr_kind, report.addr));
+            return;
         }
     }
 }
