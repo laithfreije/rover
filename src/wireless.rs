@@ -82,7 +82,7 @@ async fn rssi_task(mut control: Control<'static>, oled: &'static SharedOled) -> 
 
         // Write actual RSSI power
         let mut line: String<32> = String::new();
-        let _ = write!(line, "RSSI: {} dBm", -rssi);
+        let _ = write!(line, "{} dBm", -rssi);
 
         // Categorize RSSI        
         if rssi <= 50
