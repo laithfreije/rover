@@ -23,7 +23,7 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::{bind_interrupts, dma, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use heapless::String;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
@@ -47,6 +47,19 @@ const L2CAP_CHANNELS_MAX: usize = 3;
 /// How long to hunt for a controller before giving up (it must be in pairing
 /// mode and advertising).
 const DISCOVER_TIMEOUT_SECS: u64 = 30;
+
+/// HID-over-GATT UUIDs: the HID service and its Report characteristic.
+const HID_SERVICE_UUID: u16 = 0x1812;
+const HID_REPORT_UUID: u16 = 0x2a4d;
+
+/// OLED row where raw HID report bytes are drawn.
+const HID_BYTES_ROW: i32 = 4;
+
+/// Minimum gap between OLED redraws of the HID report. A gamepad notifies far
+/// faster than the (whole-framebuffer-flushing, blocking-I2C) panel can
+/// repaint, and a long flush stalls the BLE runner — so we drain every
+/// notification promptly but only repaint a few times a second.
+const REPORT_DRAW_MS: u64 = 200;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
@@ -190,29 +203,123 @@ pub async fn run(
             return;
         }
         set_status(oled, "PAIRING...");
-        loop {
+        let bonded = loop {
             match conn.next().await {
-                ConnectionEvent::PairingComplete { .. } => set_status(oled, "BONDED"),
+                ConnectionEvent::PairingComplete { .. } => break true,
                 ConnectionEvent::PairingFailed(_) => {
                     set_status(oled, "PAIR FAIL");
-                    break;
+                    break false;
                 }
                 ConnectionEvent::Disconnected { .. } => {
                     set_status(oled, "DISCONNECTED");
-                    break;
+                    break false;
                 }
                 ConnectionEvent::RequestConnectionParams(req) => {
                     let _ = req.accept(None, &stack).await;
                 }
                 _ => {}
             }
+        };
+        if !bonded {
+            return;
         }
+        set_status(oled, "BONDED");
+
+        // --- HID: discover the HID service, enable notifications on its input
+        // report characteristics, and dump raw report bytes. Enabling
+        // notifications is also what makes the controller consider a host
+        // "attached" (its Xbox light goes solid). ---
+        let client = match GattClient::<_, DefaultPacketPool, 10>::new(&stack, &conn).await {
+            Ok(c) => c,
+            Err(_) => {
+                set_status(oled, "GATT ERR");
+                return;
+            }
+        };
+        let _ = join(client.task(), hid_dump(&client, oled)).await;
+        set_status(oled, "HID ENDED");
     })
     .await;
 
     set_status(oled, "BT: runner died");
     loop {
         Timer::after_secs(1).await;
+    }
+}
+
+/// Discover the controller's HID service, enable notifications on each input
+/// report characteristic, then stream raw report bytes to the OLED. Returns
+/// when the GATT link ends (e.g. the controller disconnects).
+async fn hid_dump<C: Controller>(
+    client: &GattClient<'_, C, DefaultPacketPool, 10>,
+    oled: &'static SharedOled,
+) {
+    let services = match client.services_by_uuid(&Uuid::new_short(HID_SERVICE_UUID)).await {
+        Ok(s) => s,
+        Err(_) => return set_status(oled, "NO HID SVC"),
+    };
+    let service = match services.first() {
+        Some(s) => s.clone(),
+        None => return set_status(oled, "NO HID SVC"),
+    };
+
+    let chars = match client.characteristics::<16>(&service).await {
+        Ok(c) => c,
+        Err(_) => return set_status(oled, "CHAR ERR"),
+    };
+
+    // Enable notifications on every notifiable Report characteristic. Writing
+    // the CCCD here is also the signal the controller waits for before it
+    // treats us as an attached host (its Xbox light goes solid). The listener
+    // returned by `subscribe` is dropped; `listen_all` below receives the
+    // notifications for all of them.
+    let mut subs = 0u8;
+    for c in chars.iter() {
+        if c.uuid == Uuid::new_short(HID_REPORT_UUID) && c.props.has_cccd() && client.subscribe(c, false).await.is_ok() {
+            subs += 1;
+        }
+    }
+    if subs == 0 {
+        return set_status(oled, "NO HID RPT");
+    }
+    set_status(oled, "HID LIVE");
+
+    let mut listener = match client.listen_all() {
+        Ok(l) => l,
+        Err(_) => return set_status(oled, "LISTEN ERR"),
+    };
+
+    let mut last = Instant::now();
+    let mut shown_handle: Option<u16> = None;
+    loop {
+        let n = listener.next().await;
+        let now = Instant::now();
+        // Drain quickly; repaint at most every REPORT_DRAW_MS.
+        if now.duration_since(last) < Duration::from_millis(REPORT_DRAW_MS) {
+            continue;
+        }
+        last = now;
+
+        let handle = n.handle();
+        let data = n.as_ref();
+        oled.lock(|o| {
+            let mut o = o.borrow_mut();
+            // Label the source report handle (only when it changes).
+            if shown_handle != Some(handle) {
+                let mut hdr: String<OLED_COLS> = String::new();
+                let _ = write!(hdr, "rpt h{:04x}", handle);
+                o.clear_row(XBOX_ROW);
+                o.write_text(&hdr, 0, XBOX_ROW);
+            }
+            // First 8 bytes (the stick axes on an Xbox report) as hex.
+            let mut line: String<OLED_COLS> = String::new();
+            for b in data.iter().take(8) {
+                let _ = write!(line, "{:02x}", b);
+            }
+            o.clear_row(HID_BYTES_ROW);
+            o.write_text(&line, 0, HID_BYTES_ROW);
+        });
+        shown_handle = Some(handle);
     }
 }
 
