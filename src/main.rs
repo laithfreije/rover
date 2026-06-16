@@ -15,7 +15,9 @@ use crate::drivers::oled::OLED;
 mod drivers;
 mod wireless;
 
-const POWER_STATUS_ROW: i32 = 8;
+const RESET_REASON_ROW: i32 = 0;
+const POWER_STATUS_ROW: i32 = 1;
+const IP_ROW:i32 = 2;
 
 type SharedOled = Mutex<CriticalSectionRawMutex, RefCell<OLED<'static, I2c<'static, I2C0, Blocking>>>>;
 
@@ -58,15 +60,15 @@ async fn main(spawner: Spawner) {
     shared_oled.lock(|o| {
         let mut oled = o.borrow_mut();
         if had_debug_port_reset {
-            oled.write_text("Debug Port Reset", 0, 0);
+            oled.write_text("Debug Port Reset", 0, RESET_REASON_ROW);
         } else if had_run_pin_reset {
-            oled.write_text("Run Pin Reset", 0, 0);
+            oled.write_text("Run Pin Reset", 0, RESET_REASON_ROW);
         } else if had_brownout_reset {
-            oled.write_text("PwrOn | BrownOut", 0, 0);
+            oled.write_text("PwrOn | BrownOut", 0, RESET_REASON_ROW);
         } else {
-            oled.write_text("No Valid Reset Reason", 0, 0);
+            oled.write_text("No Valid Reset Reason", 0, RESET_REASON_ROW);
         }
-        oled.write_text("Connecting...", 0, connection_status_row);
+        oled.write_text("Connecting...", 0,IP_ROW);
     });
 
     // Bring up the wireless chip and join the network. Returns the IP
@@ -78,8 +80,8 @@ async fn main(spawner: Spawner) {
 
     shared_oled.lock(|o| {
         let mut oled = o.borrow_mut();
-        oled.clear_row(connection_status_row);
-        oled.write_text(status.as_str(), 0, connection_status_row);
+        oled.clear_row(IP_ROW);
+        oled.write_text(status.as_str(), 0, IP_ROW);
     });
 
     spawner.spawn(power_task(shared_oled).unwrap());

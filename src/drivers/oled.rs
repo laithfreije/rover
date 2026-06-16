@@ -17,6 +17,8 @@ type OLEDDisplay<'a, I> = Ssd1306<
     BufferedGraphicsMode<DisplaySize128x64>,
 >;
 
+const ROW_SIZE: i32 = 8;
+
 pub struct OLED<'a, I> {
     display: OLEDDisplay<'a, I>,
     text_style: MonoTextStyle<'a, BinaryColor>,
@@ -44,7 +46,7 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
     }
 
     pub fn write_text(&mut self, text: &str, x: i32, y: i32) {
-        Text::with_baseline(text, Point::new(x%8, y%8), self.text_style, Baseline::Top)
+        Text::with_baseline(text, Point::new(x*ROW_SIZE, y*ROW_SIZE), self.text_style, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
 
@@ -59,7 +61,7 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
     pub fn clear_row(&mut self, y: i32) {
         let height = IBM437_8X8_REGULAR.character_size.height;
         Rectangle::new(
-            Point::new(0, y),
+            Point::new(0, y*ROW_SIZE),
             Size::new(self.display.size().width, height),
         )
         .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
