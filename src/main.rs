@@ -1,47 +1,41 @@
 #![no_std]
 #![no_main]
 
-use cortex_m_rt::entry;
-use embedded_hal::digital::OutputPin;
-use hal::pac;
+use core::cell::RefCell;
+
+use embassy_executor::Spawner;
+use embassy_rp::i2c::{self, I2c};
+use embassy_time::Timer;
 use panic_halt as _;
-use rp2040_hal::{self as hal, Clock};
 
-#[link_section = ".boot2"]
-#[used]
-pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+use crate::drivers::oled::OLED;
 
-const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
+mod drivers;
+mod wireless;
 
-#[entry]
-fn main() -> ! {
-    let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
-    let clocks = hal::clocks::init_clocks_and_plls(
-        XOSC_CRYSTAL_FREQ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_rp::init(Default::default());
+
+    // OLED on I2C0: SDA = GPIO16, SCL = GPIO17. The bus lives in a RefCell
+    // so the ssd1306 driver can share it via embedded-hal-bus.
+    let i2c_bus = I2c::new_blocking(p.I2C0, p.PIN_17, p.PIN_16, i2c::Config::default());
+    let refcell_i2c = RefCell::new(i2c_bus);
+    let mut oled = OLED::new(&refcell_i2c);
+
+    oled.write_text("Connecting...", 0, 0);
+
+    // Bring up the wireless chip and join the network. Returns the IP
+    // address (or a failure reason) ready to display.
+    let status = wireless::init(
+        spawner, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29, p.PIO0, p.DMA_CH0,
     )
-    .ok()
-    .unwrap();
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-    let sio = hal::Sio::new(pac.SIO);
-    let pins = hal::gpio::Pins::new(
-        pac.IO_BANK0,
-        pac.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut pac.RESETS,
-    );
-    let mut led = pins.gpio25.into_push_pull_output();
+    .await;
+
+    oled.clear();
+    oled.write_text(status.as_str(), 0, 0);
+
     loop {
-        led.set_high().unwrap();
-        delay.delay_ms(500);
-        led.set_low().unwrap();
-        delay.delay_ms(500);
+        Timer::after_secs(1).await;
     }
 }
