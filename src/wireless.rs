@@ -77,11 +77,27 @@ async fn network_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<
 #[embassy_executor::task]
 async fn rssi_task(mut control: Control<'static>, oled: &'static SharedOled) -> ! {
     loop {
-        let rssi = control.get_rssi().await;
+        // Flip to positive to get magnitude
+        let rssi = -control.get_rssi().await;
 
+        // Write actual RSSI power
         let mut line: String<32> = String::new();
-        let _ = write!(line, "RSSI: {} dBm", rssi);
+        let _ = write!(line, "RSSI: {} dBm", -rssi);
 
+        // Categorize RSSI        
+        if rssi <= 50
+        {
+            let _ = write!(line, " ({})", "Strong");
+        } else if (rssi > 50) && (rssi <= 70) {
+            let _ = write!(line, " ({})", "OK");
+        } else if  (rssi > 70) && (rssi <= 80)
+        {
+            let _ = write!(line, " ({})", "Weak");
+        }else if  rssi >= 90
+        {
+            let _ = write!(line, " ({})", "Unstable");
+        }
+             
         oled.lock(|o| {
             let mut display = o.borrow_mut();
             display.clear_row(RSSI_ROW);

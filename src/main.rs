@@ -71,6 +71,8 @@ async fn main(spawner: Spawner) {
         }
         oled.write_text("Connecting...", 0,IP_ROW);
     });
+    
+    spawner.spawn(power_task(shared_oled).unwrap());
 
     // Bring up the wireless chip and join the network. Returns the IP
     // address (or a failure reason) ready to display.
@@ -85,7 +87,6 @@ async fn main(spawner: Spawner) {
         oled.write_text(status.as_str(), 0, IP_ROW);
     });
 
-    spawner.spawn(power_task(shared_oled).unwrap());
     loop {
         Timer::after_secs(1).await;
     }
