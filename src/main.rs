@@ -2,16 +2,37 @@
 #![no_main]
 
 use core::cell::RefCell;
+use core::panic::PanicInfo;
 
 use embassy_executor::Spawner;
 use embassy_rp::{
+    gpio::{AnyPin, Level, Output},
     i2c::{self, Blocking, I2c},
     peripherals::I2C0,
 };
 use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
-use embassy_time::Timer;
-use panic_halt as _;
+use embassy_time::{block_for, Duration, Timer};
 use static_cell::StaticCell;
+
+/// GPIO pin (bank 0) wired to the panic-indicator LED.
+const PANIC_LED_PIN: u8 = 14;
+
+/// Panic handler: blink the LED on [`PANIC_LED_PIN`] at 1 Hz forever.
+///
+/// By the time we land here the async executor is gone, so we can't use
+/// `Timer`/spawning. Instead we steal the pin (nothing else owns GPIO14)
+/// and use `block_for`, a busy-wait against the still-running hardware
+/// timer. A 1 Hz blink is a full on+off cycle per second, i.e. toggle
+/// every 500 ms.
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    let pin = unsafe { AnyPin::steal(PANIC_LED_PIN) };
+    let mut led = Output::new(pin, Level::Low);
+    loop {
+        led.toggle();
+        block_for(Duration::from_millis(500));
+    }
+}
 
 use crate::drivers::oled::OLED;
 
@@ -43,7 +64,6 @@ async fn power_task(oled: &'static SharedOled) -> ! {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-
     // OLED on I2C0: SDA = GPIO16, SCL = GPIO17. The bus lives in a RefCell so
     // the ssd1306 driver can share it via embedded-hal-bus. Both the bus and
     // the OLED are promoted to 'static (via StaticCell) so power_task can hold
