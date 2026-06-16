@@ -9,18 +9,21 @@
 
 use core::fmt::Write as _;
 
-use cyw43::{JoinOptions, aligned_bytes};
-use cyw43_pio::PioSpi;
+use cyw43::{aligned_bytes, Control, JoinOptions};
+use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use embassy_executor::Spawner;
 use embassy_net::{Config, StackResources};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
-use embassy_rp::{Peri, bind_interrupts, dma};
-use fixed::FixedU32;
+use embassy_rp::{bind_interrupts, dma, Peri};
+use embassy_time::Timer;
 use fixed::types::extra::U8;
+use fixed::FixedU32;
 use heapless::String;
 use static_cell::StaticCell;
+
+use crate::SharedOled;
 
 // `WIFI_NETWORK` / `WIFI_PASSWORD` are generated from `wifi.toml` by `build.rs`.
 include!(concat!(env!("OUT_DIR"), "/wifi.rs"));
@@ -30,10 +33,16 @@ bind_interrupts!(struct Irqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>;
 });
 
-/// Hand-tuned PIO clock divider for the cyw43 GSPI link. The RP2040
-/// board this firmware targets is not reliable below divider 6
-/// (~10 MHz GSPI), so the cyw43 driver's default is overridden here.
-const CLOCK_DIVIDER: FixedU32<U8> = FixedU32::from_bits(0x0600);
+/// PIO clock divider for the cyw43 GSPI link. `DEFAULT_CLOCK_DIVIDER`
+/// (divider 2) runs the bus at its full rated speed: on a stock RP2040
+/// (133 MHz) that's a 66.5 MHz PIO clock -> 33.25 MHz GSPI, within the
+/// chip's 50 MHz maximum. The driver's bus self-test (REG_BUS_TEST_RO/RW)
+/// runs at boot, so if a board can't keep up at this speed it hangs or
+/// panics during init rather than booting through to an IP.
+///
+/// To probe past spec, swap in `cyw43_pio::OVERCLOCK_CLOCK_DIVIDER`
+/// (divider 1 -> 66.5 MHz GSPI, ~33% over the manufacturer max).
+const CLOCK_DIVIDER: FixedU32<U8> = DEFAULT_CLOCK_DIVIDER;
 
 /// `smoltcp` per-stack resource pool size. Two sockets cover DHCP + DNS,
 /// which is all this firmware needs to obtain and display an address.
@@ -43,6 +52,13 @@ const STACK_SOCKET_COUNT: usize = 2;
 /// randomise TCP initial sequence numbers; this firmware opens no TCP
 /// sockets, so a constant seed is fine and avoids pulling in an RNG.
 const NET_SEED: u64 = 0x0123_4567_89ab_cdef;
+
+/// OLED row (y, pixels) where the live RSSI reading is drawn. Sits below
+/// the reset reason (y=0), VREG status (y=8), and IP/connection (y=16).
+const RSSI_ROW: i32 = 3;
+
+/// How often the RSSI reading is refreshed.
+const RSSI_POLL_SECS: u64 = 1;
 
 /// Background task that drives the cyw43 SPI runner. Must run for the
 /// network stack to make progress.
@@ -59,6 +75,43 @@ async fn network_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<
     runner.run().await
 }
 
+/// Background task that polls the cyw43 link RSSI and draws it on the OLED.
+/// Owns `control` outright (nothing else needs it once the link is up), so
+/// no locking is required to call its `&mut self` methods.
+#[embassy_executor::task]
+async fn rssi_task(mut control: Control<'static>, oled: &'static SharedOled) -> ! {
+    let mut enable_state = false;
+    loop {
+        // Flip to positive to get magnitude
+        let rssi = -control.get_rssi().await;
+
+        // Write actual RSSI power
+        let mut line: String<32> = String::new();
+        let _ = write!(line, "{} dBm", -rssi);
+
+        // Categorize RSSI
+        if rssi <= 50 {
+            let _ = write!(line, " ({})", "Strong");
+        } else if (rssi > 50) && (rssi <= 70) {
+            let _ = write!(line, " ({})", "OK");
+        } else if (rssi > 70) && (rssi <= 80) {
+            let _ = write!(line, " ({})", "Weak");
+        } else if rssi >= 90 {
+            let _ = write!(line, " ({})", "Unstable");
+        }
+
+        oled.lock(|o| {
+            let mut display = o.borrow_mut();
+            display.clear_row(RSSI_ROW);
+            display.write_text(&line, 0, RSSI_ROW);
+        });
+
+        enable_state = !enable_state;
+        control.gpio_set(0, enable_state).await;
+        Timer::after_secs(RSSI_POLL_SECS).await;
+    }
+}
+
 /// Bring up the wireless chip, join the configured network, and wait for
 /// a DHCP lease. Returns a short, OLED-friendly status line: the acquired
 /// IPv4 address on success, or a failure reason.
@@ -70,6 +123,7 @@ pub async fn init(
     clk_pin: Peri<'static, PIN_29>,
     pio_0: Peri<'static, PIO0>,
     dma_0: Peri<'static, DMA_CH0>,
+    oled: &'static SharedOled,
 ) -> String<32> {
     let fw = aligned_bytes!("blobs/43439A0.bin");
     let clm = aligned_bytes!("blobs/43439A0_clm.bin");
@@ -97,14 +151,18 @@ pub async fn init(
 
     control.init(clm).await;
     control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .set_power_management(cyw43::PowerManagementMode::None)
         .await;
 
     let config = Config::dhcpv4(Default::default());
 
     static RESOURCES: StaticCell<StackResources<STACK_SOCKET_COUNT>> = StaticCell::new();
-    let (stack, embassy_runner) =
-        embassy_net::new(net_device, config, RESOURCES.init(StackResources::new()), NET_SEED);
+    let (stack, embassy_runner) = embassy_net::new(
+        net_device,
+        config,
+        RESOURCES.init(StackResources::new()),
+        NET_SEED,
+    );
 
     spawner.spawn(network_task(embassy_runner).unwrap());
 
@@ -129,5 +187,7 @@ pub async fn init(
             let _ = status.push_str("No IPv4 config");
         }
     }
+
+    spawner.spawn(rssi_task(control, oled).unwrap());
     status
 }

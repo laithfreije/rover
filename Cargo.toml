@@ -6,7 +6,6 @@ build = "build.rs"
 
 [dependencies]
 cortex-m-rt = "0.7.5"
-panic-halt = "0.2"
 critical-section = "1.2.0"
 portable-atomic = { version = "1.5", features = ["critical-section"] }
 static_cell = "2.1"
@@ -22,6 +21,7 @@ ssd1306 = "0.10.0"
 
 # Embassy async runtime + RP2040 HAL
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-sync = { version = "0.8.0" }
 embassy-time = { version = "0.5.1" }
 embassy-rp = { version = "0.10.0", features = ["unstable-pac", "time-driver", "critical-section-impl", "rp2040"] }
 embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "proto-ipv4"] }
