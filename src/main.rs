@@ -27,7 +27,10 @@ async fn power_task(oled: &'static SharedOled) -> ! {
         // Check status of regulator 
         let is_ok = embassy_rp::pac::VREG_AND_CHIP_RESET.vreg().read().rok();
         if is_ok {
-            oled.lock(|o| o.borrow_mut().write_text("VREG: OK", 0, POWER_STATUS_ROW));
+            oled.lock(|o| o.borrow_mut().write_text("vreg: ok", 0, POWER_STATUS_ROW));
+        }
+        else {
+            oled.lock(|o| o.borrow_mut().write_text("vreg: bad", 0, POWER_STATUS_ROW));
         }
 
         Timer::after_millis(100).await;
