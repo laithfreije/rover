@@ -46,9 +46,14 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
     }
 
     pub fn write_text(&mut self, text: &str, x: i32, y: i32) {
-        Text::with_baseline(text, Point::new(x*ROW_SIZE, y*ROW_SIZE), self.text_style, Baseline::Top)
-            .draw(&mut self.display)
-            .unwrap();
+        Text::with_baseline(
+            text,
+            Point::new(x * ROW_SIZE, y * ROW_SIZE),
+            self.text_style,
+            Baseline::Top,
+        )
+        .draw(&mut self.display)
+        .unwrap();
 
         self.display.flush().unwrap();
     }
@@ -61,7 +66,7 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
     pub fn clear_row(&mut self, y: i32) {
         let height = IBM437_8X8_REGULAR.character_size.height;
         Rectangle::new(
-            Point::new(0, y*ROW_SIZE),
+            Point::new(0, y * ROW_SIZE),
             Size::new(self.display.size().width, height),
         )
         .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))

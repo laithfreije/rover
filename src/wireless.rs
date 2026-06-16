@@ -9,17 +9,17 @@
 
 use core::fmt::Write as _;
 
-use cyw43::{Control, JoinOptions, aligned_bytes};
+use cyw43::{aligned_bytes, Control, JoinOptions};
 use cyw43_pio::PioSpi;
 use embassy_executor::Spawner;
 use embassy_net::{Config, StackResources};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
-use embassy_rp::{Peri, bind_interrupts, dma};
+use embassy_rp::{bind_interrupts, dma, Peri};
 use embassy_time::Timer;
-use fixed::FixedU32;
 use fixed::types::extra::U8;
+use fixed::FixedU32;
 use heapless::String;
 use static_cell::StaticCell;
 
@@ -66,10 +66,8 @@ async fn cyw43_task(
 /// Background task that drives the embassy-net stack (IP, DHCP, ...).
 #[embassy_executor::task]
 async fn network_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
-    
     runner.run().await
 }
-
 
 /// Background task that polls the cyw43 link RSSI and draws it on the OLED.
 /// Owns `control` outright (nothing else needs it once the link is up), so
@@ -84,20 +82,17 @@ async fn rssi_task(mut control: Control<'static>, oled: &'static SharedOled) -> 
         let mut line: String<32> = String::new();
         let _ = write!(line, "{} dBm", -rssi);
 
-        // Categorize RSSI        
-        if rssi <= 50
-        {
+        // Categorize RSSI
+        if rssi <= 50 {
             let _ = write!(line, " ({})", "Strong");
         } else if (rssi > 50) && (rssi <= 70) {
             let _ = write!(line, " ({})", "OK");
-        } else if  (rssi > 70) && (rssi <= 80)
-        {
+        } else if (rssi > 70) && (rssi <= 80) {
             let _ = write!(line, " ({})", "Weak");
-        }else if  rssi >= 90
-        {
+        } else if rssi >= 90 {
             let _ = write!(line, " ({})", "Unstable");
         }
-             
+
         oled.lock(|o| {
             let mut display = o.borrow_mut();
             display.clear_row(RSSI_ROW);
@@ -119,7 +114,7 @@ pub async fn init(
     clk_pin: Peri<'static, PIN_29>,
     pio_0: Peri<'static, PIO0>,
     dma_0: Peri<'static, DMA_CH0>,
-    oled: &'static SharedOled
+    oled: &'static SharedOled,
 ) -> String<32> {
     let fw = aligned_bytes!("blobs/43439A0.bin");
     let clm = aligned_bytes!("blobs/43439A0_clm.bin");
@@ -153,8 +148,12 @@ pub async fn init(
     let config = Config::dhcpv4(Default::default());
 
     static RESOURCES: StaticCell<StackResources<STACK_SOCKET_COUNT>> = StaticCell::new();
-    let (stack, embassy_runner) =
-        embassy_net::new(net_device, config, RESOURCES.init(StackResources::new()), NET_SEED);
+    let (stack, embassy_runner) = embassy_net::new(
+        net_device,
+        config,
+        RESOURCES.init(StackResources::new()),
+        NET_SEED,
+    );
 
     spawner.spawn(network_task(embassy_runner).unwrap());
 

@@ -3,9 +3,12 @@
 
 use core::cell::RefCell;
 
-use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_executor::Spawner;
-use embassy_rp::{i2c::{self, Blocking, I2c}, peripherals::I2C0};
+use embassy_rp::{
+    i2c::{self, Blocking, I2c},
+    peripherals::I2C0,
+};
+use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_time::Timer;
 use panic_halt as _;
 use static_cell::StaticCell;
@@ -17,19 +20,19 @@ mod wireless;
 
 const RESET_REASON_ROW: i32 = 0;
 const POWER_STATUS_ROW: i32 = 1;
-const IP_ROW:i32 = 2;
+const IP_ROW: i32 = 2;
 
-pub type SharedOled = Mutex<CriticalSectionRawMutex, RefCell<OLED<'static, I2c<'static, I2C0, Blocking>>>>;
+pub type SharedOled =
+    Mutex<CriticalSectionRawMutex, RefCell<OLED<'static, I2c<'static, I2C0, Blocking>>>>;
 
 #[embassy_executor::task]
 async fn power_task(oled: &'static SharedOled) -> ! {
     loop {
-        // Check status of regulator 
+        // Check status of regulator
         let is_ok = embassy_rp::pac::VREG_AND_CHIP_RESET.vreg().read().rok();
         if is_ok {
             oled.lock(|o| o.borrow_mut().write_text("vreg: ok", 0, POWER_STATUS_ROW));
-        }
-        else {
+        } else {
             oled.lock(|o| o.borrow_mut().write_text("vreg: bad", 0, POWER_STATUS_ROW));
         }
 
@@ -54,9 +57,18 @@ async fn main(spawner: Spawner) {
     let shared_oled: &'static SharedOled = OLED_CELL.init(Mutex::new(RefCell::new(oled)));
 
     // Check if reset was caused by brownout
-    let had_debug_port_reset = embassy_rp::pac::VREG_AND_CHIP_RESET.chip_reset().read().had_psm_restart();
-    let had_run_pin_reset = embassy_rp::pac::VREG_AND_CHIP_RESET.chip_reset().read().had_run();
-    let had_brownout_reset = embassy_rp::pac::VREG_AND_CHIP_RESET.chip_reset().read().had_por();
+    let had_debug_port_reset = embassy_rp::pac::VREG_AND_CHIP_RESET
+        .chip_reset()
+        .read()
+        .had_psm_restart();
+    let had_run_pin_reset = embassy_rp::pac::VREG_AND_CHIP_RESET
+        .chip_reset()
+        .read()
+        .had_run();
+    let had_brownout_reset = embassy_rp::pac::VREG_AND_CHIP_RESET
+        .chip_reset()
+        .read()
+        .had_por();
 
     shared_oled.lock(|o| {
         let mut oled = o.borrow_mut();
@@ -69,15 +81,22 @@ async fn main(spawner: Spawner) {
         } else {
             oled.write_text("No Valid Reset Reason", 0, RESET_REASON_ROW);
         }
-        oled.write_text("Connecting...", 0,IP_ROW);
+        oled.write_text("Connecting...", 0, IP_ROW);
     });
-    
+
     spawner.spawn(power_task(shared_oled).unwrap());
 
     // Bring up the wireless chip and join the network. Returns the IP
     // address (or a failure reason) ready to display.
     let status = wireless::init(
-        spawner, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29, p.PIO0, p.DMA_CH0, shared_oled
+        spawner,
+        p.PIN_23,
+        p.PIN_24,
+        p.PIN_25,
+        p.PIN_29,
+        p.PIO0,
+        p.DMA_CH0,
+        shared_oled,
     )
     .await;
 
