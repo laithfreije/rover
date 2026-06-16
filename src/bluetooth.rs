@@ -31,8 +31,11 @@ use crate::SharedOled;
 /// Wi-Fi build used for its IP/connection line.
 const BT_STATUS_ROW: i32 = 2;
 
-/// OLED rows used to list discovered BLE devices (one per line, wrapping).
-const DEVICE_ROW_FIRST: i32 = 3;
+/// OLED row reserved for a found Xbox controller (its MAC).
+const XBOX_ROW: i32 = 3;
+
+/// OLED rows used to list other named BLE devices (one per line, wrapping).
+const DEVICE_ROW_FIRST: i32 = 4;
 const DEVICE_ROW_LAST: i32 = 7;
 
 /// Max distinct devices remembered for de-duplication while scanning.
@@ -158,17 +161,23 @@ pub async fn run(
     }
 }
 
-/// Scan-result sink: remembers which devices it has already shown and prints
-/// each newly discovered one to the OLED (advertised name if present, else the
-/// MAC). Rows cycle through [`DEVICE_ROW_FIRST`]..=[`DEVICE_ROW_LAST`].
+/// Scan-result sink. Only devices that advertise a local name are shown (most
+/// of the BLE noise around us advertises no name, and showing every MAC floods
+/// the panel). A device named like an Xbox controller is called out on its own
+/// fixed rows; other named devices cycle through the remaining rows.
+///
+/// De-duplication keys on "already displayed with a name" rather than "address
+/// seen", so a device's scan response (which carries the name) still gets shown
+/// even though its earlier, nameless `ADV_IND` was seen first.
 struct DeviceList {
     oled: &'static SharedOled,
     inner: RefCell<DeviceListInner>,
 }
 
 struct DeviceListInner {
-    seen: Deque<BdAddr, SEEN_MAX>,
+    named: Deque<BdAddr, SEEN_MAX>,
     next_row: i32,
+    xbox_shown: bool,
 }
 
 impl DeviceList {
@@ -176,11 +185,20 @@ impl DeviceList {
         Self {
             oled,
             inner: RefCell::new(DeviceListInner {
-                seen: Deque::new(),
+                named: Deque::new(),
                 next_row: DEVICE_ROW_FIRST,
+                xbox_shown: false,
             }),
         }
     }
+}
+
+/// Case-insensitive substring test for "xbox" in an advertised name.
+fn is_xbox_name(name: &str) -> bool {
+    let needle = b"xbox";
+    name.as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 impl EventHandler for DeviceList {
@@ -188,50 +206,68 @@ impl EventHandler for DeviceList {
         let mut inner = self.inner.borrow_mut();
         while let Some(Ok(report)) = it.next() {
             let addr = report.addr;
-            if inner.seen.iter().any(|b| b.raw() == addr.raw()) {
-                continue;
-            }
-            if inner.seen.is_full() {
-                inner.seen.pop_front();
-            }
-            let _ = inner.seen.push_back(addr);
 
-            // Prefer the advertised local name; fall back to the MAC.
-            let mut label: String<OLED_COLS> = String::new();
+            // Extract the advertised local name, if any. Skip nameless reports.
+            let mut name: String<OLED_COLS> = String::new();
+            let mut has_name = false;
             for ad in AdStructure::decode(report.data) {
-                let name = match ad {
+                let bytes = match ad {
                     Ok(AdStructure::CompleteLocalName(n)) | Ok(AdStructure::ShortenedLocalName(n)) => n,
                     _ => continue,
                 };
-                if let Ok(s) = core::str::from_utf8(name) {
+                has_name = true;
+                if let Ok(s) = core::str::from_utf8(bytes) {
                     for c in s.chars() {
-                        if label.push(c).is_err() {
+                        if name.push(c).is_err() {
                             break;
                         }
                     }
                 }
                 break;
             }
-            if label.is_empty() {
+            if !has_name {
+                continue;
+            }
+
+            // Only show each named device once.
+            if inner.named.iter().any(|b| b.raw() == addr.raw()) {
+                continue;
+            }
+            if inner.named.is_full() {
+                inner.named.pop_front();
+            }
+            let _ = inner.named.push_back(addr);
+
+            if is_xbox_name(&name) && !inner.xbox_shown {
+                inner.xbox_shown = true;
                 let m = addr.raw();
+                let mut mac: String<OLED_COLS> = String::new();
                 let _ = write!(
-                    label,
+                    mac,
                     "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
                     m[5], m[4], m[3], m[2], m[1], m[0]
                 );
+                self.oled.lock(|o| {
+                    let mut o = o.borrow_mut();
+                    o.clear_row(BT_STATUS_ROW);
+                    o.write_text("FOUND XBOX", 0, BT_STATUS_ROW);
+                    o.clear_row(XBOX_ROW);
+                    o.write_text(&mac, 0, XBOX_ROW);
+                });
+                continue;
             }
 
+            // Other named device: print on the next cycling row.
             let row = inner.next_row;
             inner.next_row = if row >= DEVICE_ROW_LAST {
                 DEVICE_ROW_FIRST
             } else {
                 row + 1
             };
-
             self.oled.lock(|o| {
                 let mut o = o.borrow_mut();
                 o.clear_row(row);
-                o.write_text(&label, 0, row);
+                o.write_text(&name, 0, row);
             });
         }
     }
