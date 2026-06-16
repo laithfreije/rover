@@ -9,14 +9,19 @@
 //! the BLE host stack, and runs the host runner. Scanning/bonding/HID land in
 //! following commits.
 
+use core::cell::RefCell;
+use core::fmt::Write as _;
+
 use cyw43::{aligned_bytes, Cyw43439};
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use embassy_executor::Spawner;
+use embassy_futures::join::join;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::{bind_interrupts, dma, Peri};
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
+use heapless::{Deque, String};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -25,6 +30,16 @@ use crate::SharedOled;
 /// OLED row (8px units) where Bluetooth status is drawn. Mirrors the row the
 /// Wi-Fi build used for its IP/connection line.
 const BT_STATUS_ROW: i32 = 2;
+
+/// OLED rows used to list discovered BLE devices (one per line, wrapping).
+const DEVICE_ROW_FIRST: i32 = 3;
+const DEVICE_ROW_LAST: i32 = 7;
+
+/// Max distinct devices remembered for de-duplication while scanning.
+const SEEN_MAX: usize = 32;
+
+/// OLED width in 8x8 characters (128px / 8).
+const OLED_COLS: usize = 16;
 
 /// trouble-host resource sizing. Only the controller connects, so one
 /// connection slot suffices; the L2CAP channels cover signalling + ATT plus a
@@ -104,17 +119,34 @@ pub async fn run(
         .set_random_address(address)
         .build();
     let mut runner = stack.runner();
+    let central = stack.central();
 
     oled.lock(|o| {
         let mut o = o.borrow_mut();
         o.clear_row(BT_STATUS_ROW);
-        o.write_text("BT: up", 0, BT_STATUS_ROW);
+        o.write_text("BT: scanning", 0, BT_STATUS_ROW);
     });
 
-    // Drive the host stack. `runner.run()` performs HCI reset/init and processes
-    // controller events; nothing else makes progress without it. It only
-    // returns on a fatal error, which we surface before idling.
-    let _ = runner.run().await;
+    // Active scan so peripherals send scan responses (which usually carry the
+    // device name). Discovered devices are routed to `DeviceList`, which prints
+    // each new one to the OLED. `run_with_handler` drives the host stack and
+    // delivers advertising reports to the handler; it must run for scanning to
+    // make progress.
+    let devices = DeviceList::new(oled);
+    let mut scanner = Scanner::new(central);
+    let _ = join(runner.run_with_handler(&devices), async {
+        let mut config = ScanConfig::default();
+        config.active = true;
+        config.phys = PhySet::M1;
+        config.interval = Duration::from_secs(1);
+        config.window = Duration::from_secs(1);
+        let _session = scanner.scan(&config).await.unwrap();
+        // Keep the scan session alive; the handler does the work.
+        loop {
+            Timer::after_secs(1).await;
+        }
+    })
+    .await;
 
     oled.lock(|o| {
         let mut o = o.borrow_mut();
@@ -123,5 +155,84 @@ pub async fn run(
     });
     loop {
         Timer::after_secs(1).await;
+    }
+}
+
+/// Scan-result sink: remembers which devices it has already shown and prints
+/// each newly discovered one to the OLED (advertised name if present, else the
+/// MAC). Rows cycle through [`DEVICE_ROW_FIRST`]..=[`DEVICE_ROW_LAST`].
+struct DeviceList {
+    oled: &'static SharedOled,
+    inner: RefCell<DeviceListInner>,
+}
+
+struct DeviceListInner {
+    seen: Deque<BdAddr, SEEN_MAX>,
+    next_row: i32,
+}
+
+impl DeviceList {
+    fn new(oled: &'static SharedOled) -> Self {
+        Self {
+            oled,
+            inner: RefCell::new(DeviceListInner {
+                seen: Deque::new(),
+                next_row: DEVICE_ROW_FIRST,
+            }),
+        }
+    }
+}
+
+impl EventHandler for DeviceList {
+    fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
+        let mut inner = self.inner.borrow_mut();
+        while let Some(Ok(report)) = it.next() {
+            let addr = report.addr;
+            if inner.seen.iter().any(|b| b.raw() == addr.raw()) {
+                continue;
+            }
+            if inner.seen.is_full() {
+                inner.seen.pop_front();
+            }
+            let _ = inner.seen.push_back(addr);
+
+            // Prefer the advertised local name; fall back to the MAC.
+            let mut label: String<OLED_COLS> = String::new();
+            for ad in AdStructure::decode(report.data) {
+                let name = match ad {
+                    Ok(AdStructure::CompleteLocalName(n)) | Ok(AdStructure::ShortenedLocalName(n)) => n,
+                    _ => continue,
+                };
+                if let Ok(s) = core::str::from_utf8(name) {
+                    for c in s.chars() {
+                        if label.push(c).is_err() {
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+            if label.is_empty() {
+                let m = addr.raw();
+                let _ = write!(
+                    label,
+                    "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    m[5], m[4], m[3], m[2], m[1], m[0]
+                );
+            }
+
+            let row = inner.next_row;
+            inner.next_row = if row >= DEVICE_ROW_LAST {
+                DEVICE_ROW_FIRST
+            } else {
+                row + 1
+            };
+
+            self.oled.lock(|o| {
+                let mut o = o.borrow_mut();
+                o.clear_row(row);
+                o.write_text(&label, 0, row);
+            });
+        }
     }
 }
