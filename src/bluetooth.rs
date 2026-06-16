@@ -340,17 +340,38 @@ fn is_xbox_name(name: &str) -> bool {
         .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
-/// Does this advertising payload carry a local name containing "xbox"?
+/// AD type for "Appearance" (Core Spec supplement). Not modelled by
+/// `AdStructure`, so it surfaces as `Unknown`.
+const AD_TYPE_APPEARANCE: u8 = 0x19;
+/// BLE Appearance value for a HID Gamepad.
+const APPEARANCE_GAMEPAD: u16 = 0x03c4;
+
+/// Should we treat this advertiser as a controller to connect to?
+///
+/// Matches either a local name containing "xbox" *or* an advertised Gamepad
+/// appearance. The appearance check matters because once a controller has
+/// bonded it often re-advertises for reconnection without its name; keying on
+/// the Gamepad appearance still recognises it without matching every BLE HID
+/// device (keyboards, mice, ...).
 fn adv_is_xbox(data: &[u8]) -> bool {
     for ad in AdStructure::decode(data) {
-        let bytes = match ad {
-            Ok(AdStructure::CompleteLocalName(n)) | Ok(AdStructure::ShortenedLocalName(n)) => n,
-            _ => continue,
-        };
-        if let Ok(s) = core::str::from_utf8(bytes) {
-            if is_xbox_name(s) {
-                return true;
+        match ad {
+            Ok(AdStructure::CompleteLocalName(n)) | Ok(AdStructure::ShortenedLocalName(n)) => {
+                if let Ok(s) = core::str::from_utf8(n) {
+                    if is_xbox_name(s) {
+                        return true;
+                    }
+                }
             }
+            Ok(AdStructure::Unknown {
+                ty: AD_TYPE_APPEARANCE,
+                data,
+            }) if data.len() >= 2 => {
+                if u16::from_le_bytes([data[0], data[1]]) == APPEARANCE_GAMEPAD {
+                    return true;
+                }
+            }
+            _ => {}
         }
     }
     false
