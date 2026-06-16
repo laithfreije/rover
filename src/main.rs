@@ -19,7 +19,7 @@ const RESET_REASON_ROW: i32 = 0;
 const POWER_STATUS_ROW: i32 = 1;
 const IP_ROW:i32 = 2;
 
-type SharedOled = Mutex<CriticalSectionRawMutex, RefCell<OLED<'static, I2c<'static, I2C0, Blocking>>>>;
+pub type SharedOled = Mutex<CriticalSectionRawMutex, RefCell<OLED<'static, I2c<'static, I2C0, Blocking>>>>;
 
 #[embassy_executor::task]
 async fn power_task(oled: &'static SharedOled) -> ! {
@@ -53,8 +53,6 @@ async fn main(spawner: Spawner) {
     static OLED_CELL: StaticCell<SharedOled> = StaticCell::new();
     let shared_oled: &'static SharedOled = OLED_CELL.init(Mutex::new(RefCell::new(oled)));
 
-    let connection_status_row = 16;
-
     // Check if reset was caused by brownout
     let had_debug_port_reset = embassy_rp::pac::VREG_AND_CHIP_RESET.chip_reset().read().had_psm_restart();
     let had_run_pin_reset = embassy_rp::pac::VREG_AND_CHIP_RESET.chip_reset().read().had_run();
@@ -77,7 +75,7 @@ async fn main(spawner: Spawner) {
     // Bring up the wireless chip and join the network. Returns the IP
     // address (or a failure reason) ready to display.
     let status = wireless::init(
-        spawner, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29, p.PIO0, p.DMA_CH0,
+        spawner, p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29, p.PIO0, p.DMA_CH0, shared_oled
     )
     .await;
 

@@ -9,7 +9,7 @@
 
 use core::fmt::Write as _;
 
-use cyw43::{JoinOptions, aligned_bytes};
+use cyw43::{Control, JoinOptions, aligned_bytes};
 use cyw43_pio::PioSpi;
 use embassy_executor::Spawner;
 use embassy_net::{Config, StackResources};
@@ -17,10 +17,13 @@ use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::{Peri, bind_interrupts, dma};
+use embassy_time::Timer;
 use fixed::FixedU32;
 use fixed::types::extra::U8;
 use heapless::String;
 use static_cell::StaticCell;
+
+use crate::SharedOled;
 
 // `WIFI_NETWORK` / `WIFI_PASSWORD` are generated from `wifi.toml` by `build.rs`.
 include!(concat!(env!("OUT_DIR"), "/wifi.rs"));
@@ -44,6 +47,13 @@ const STACK_SOCKET_COUNT: usize = 2;
 /// sockets, so a constant seed is fine and avoids pulling in an RNG.
 const NET_SEED: u64 = 0x0123_4567_89ab_cdef;
 
+/// OLED row (y, pixels) where the live RSSI reading is drawn. Sits below
+/// the reset reason (y=0), VREG status (y=8), and IP/connection (y=16).
+const RSSI_ROW: i32 = 3;
+
+/// How often the RSSI reading is refreshed.
+const RSSI_POLL_SECS: u64 = 2;
+
 /// Background task that drives the cyw43 SPI runner. Must run for the
 /// network stack to make progress.
 #[embassy_executor::task]
@@ -56,7 +66,30 @@ async fn cyw43_task(
 /// Background task that drives the embassy-net stack (IP, DHCP, ...).
 #[embassy_executor::task]
 async fn network_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
+    
     runner.run().await
+}
+
+
+/// Background task that polls the cyw43 link RSSI and draws it on the OLED.
+/// Owns `control` outright (nothing else needs it once the link is up), so
+/// no locking is required to call its `&mut self` methods.
+#[embassy_executor::task]
+async fn rssi_task(mut control: Control<'static>, oled: &'static SharedOled) -> ! {
+    loop {
+        let rssi = control.get_rssi().await;
+
+        let mut line: String<32> = String::new();
+        let _ = write!(line, "RSSI: {} dBm", rssi);
+
+        oled.lock(|o| {
+            let mut display = o.borrow_mut();
+            display.clear_row(RSSI_ROW);
+            display.write_text(&line, 0, RSSI_ROW);
+        });
+
+        Timer::after_secs(RSSI_POLL_SECS).await;
+    }
 }
 
 /// Bring up the wireless chip, join the configured network, and wait for
@@ -70,6 +103,7 @@ pub async fn init(
     clk_pin: Peri<'static, PIN_29>,
     pio_0: Peri<'static, PIO0>,
     dma_0: Peri<'static, DMA_CH0>,
+    oled: &'static SharedOled
 ) -> String<32> {
     let fw = aligned_bytes!("blobs/43439A0.bin");
     let clm = aligned_bytes!("blobs/43439A0_clm.bin");
@@ -97,7 +131,7 @@ pub async fn init(
 
     control.init(clm).await;
     control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
+        .set_power_management(cyw43::PowerManagementMode::None)
         .await;
 
     let config = Config::dhcpv4(Default::default());
@@ -129,5 +163,7 @@ pub async fn init(
             let _ = status.push_str("No IPv4 config");
         }
     }
+
+    spawner.spawn(rssi_task(control, oled).unwrap());
     status
 }
