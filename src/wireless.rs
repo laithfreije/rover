@@ -10,7 +10,7 @@
 use core::fmt::Write as _;
 
 use cyw43::{aligned_bytes, Control, JoinOptions};
-use cyw43_pio::PioSpi;
+use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
 use embassy_executor::Spawner;
 use embassy_net::{Config, StackResources};
 use embassy_rp::gpio::{Level, Output};
@@ -33,10 +33,16 @@ bind_interrupts!(struct Irqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>;
 });
 
-/// Hand-tuned PIO clock divider for the cyw43 GSPI link. The RP2040
-/// board this firmware targets is not reliable below divider 6
-/// (~10 MHz GSPI), so the cyw43 driver's default is overridden here.
-const CLOCK_DIVIDER: FixedU32<U8> = FixedU32::from_bits(0x0600);
+/// PIO clock divider for the cyw43 GSPI link. `DEFAULT_CLOCK_DIVIDER`
+/// (divider 2) runs the bus at its full rated speed: on a stock RP2040
+/// (133 MHz) that's a 66.5 MHz PIO clock -> 33.25 MHz GSPI, within the
+/// chip's 50 MHz maximum. The driver's bus self-test (REG_BUS_TEST_RO/RW)
+/// runs at boot, so if a board can't keep up at this speed it hangs or
+/// panics during init rather than booting through to an IP.
+///
+/// To probe past spec, swap in `cyw43_pio::OVERCLOCK_CLOCK_DIVIDER`
+/// (divider 1 -> 66.5 MHz GSPI, ~33% over the manufacturer max).
+const CLOCK_DIVIDER: FixedU32<U8> = DEFAULT_CLOCK_DIVIDER;
 
 /// `smoltcp` per-stack resource pool size. Two sockets cover DHCP + DNS,
 /// which is all this firmware needs to obtain and display an address.
