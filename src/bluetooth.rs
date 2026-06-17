@@ -15,17 +15,22 @@ use core::fmt::Write as _;
 
 use cyw43::{aligned_bytes, Cyw43439};
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
+use embassy_embedded_hal::adapter::BlockingAsync;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_futures::select::select3;
+use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, FLASH, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::{bind_interrupts, dma, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use heapless::String;
+use sequential_storage::cache::NoCache;
+use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
+use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
@@ -48,6 +53,15 @@ const L2CAP_CHANNELS_MAX: usize = 3;
 /// How long to hunt for a controller before giving up (it must be in pairing
 /// mode and advertising).
 const DISCOVER_TIMEOUT_SECS: u64 = 30;
+
+/// Total RP2040/Pico W flash size.
+const FLASH_SIZE: usize = 2 * 1024 * 1024;
+/// Bytes reserved at the end of flash for bond storage. Must be a multiple of
+/// the 4K erase size; sequential-storage needs at least two pages. Kept in sync
+/// with the region carved out of the code area in `memory.x`.
+const STORAGE_LEN: u32 = 8 * 1024;
+/// Flash offset (from the start of flash) of the bond-storage region.
+const STORAGE_OFFSET: u32 = FLASH_SIZE as u32 - STORAGE_LEN;
 
 /// HID-over-GATT UUIDs: the HID service and its Report characteristic.
 const HID_SERVICE_UUID: u16 = 0x1812;
@@ -78,6 +92,13 @@ async fn cyw43_task(
     runner.run().await
 }
 
+/// Persisted bond record. `BondInformation` (peer identity + long-term key) is
+/// `Serialize`/`Deserialize` under trouble-host's `serde` feature; the newtype
+/// wrapper lets us implement sequential-storage's `PostcardValue` (orphan rule).
+#[derive(Serialize, Deserialize)]
+struct StoredBond(BondInformation);
+impl<'a> PostcardValue<'a> for StoredBond {}
+
 /// Bring up the cyw43 Bluetooth controller, discover an Xbox controller by
 /// name, connect, and bond. Never returns.
 #[allow(clippy::too_many_arguments)]
@@ -90,6 +111,7 @@ pub async fn run(
     pio0: Peri<'static, PIO0>,
     dma0: Peri<'static, DMA_CH0>,
     dma1: Peri<'static, DMA_CH1>,
+    flash_peri: Peri<'static, FLASH>,
     oled: &'static SharedOled,
 ) -> ! {
     let fw = aligned_bytes!("blobs/43439A0.bin");
@@ -134,6 +156,25 @@ pub async fn run(
         .set_random_address(address)
         .build();
     let mut runner = stack.runner();
+
+    // Open bond storage in the reserved flash region and load any saved bond.
+    // Adding it to the stack lets a later reconnect resume encryption without
+    // re-pairing (the controller keeps its side of the bond across reboots too).
+    let flash = Flash::<_, Blocking, FLASH_SIZE>::new_blocking(flash_peri);
+    let mut flash = BlockingAsync::new(flash);
+    let mut bonds = MapStorage::<(), _, _>::new(
+        &mut flash,
+        MapConfig::new(STORAGE_OFFSET..(STORAGE_OFFSET + STORAGE_LEN)),
+        NoCache::new(),
+    );
+    let mut bond_buf = [0u8; 128];
+    let mut has_bond = match bonds.fetch_item(&mut bond_buf, &()).await {
+        Ok(Some(StoredBond(bond))) => {
+            let _ = stack.add_bond_information(bond);
+            true
+        }
+        _ => false,
+    };
 
     // Address of a discovered controller, handed from the (synchronous) scan
     // event handler to the async connect logic below.
@@ -200,11 +241,11 @@ pub async fn run(
             };
             set_status(oled, "CONNECTED");
 
-            // Establish an encrypted link. On the first connection this performs
-            // the Just Works pairing/bond (the Xbox controller won't serve HID
-            // reports until encrypted); on a reconnect it resumes from the bond
-            // already held in RAM.
-            let _ = conn.set_bondable(true);
+            // Establish an encrypted link. With no stored bond this performs the
+            // Just Works pairing/bond (the Xbox controller won't serve HID
+            // reports until encrypted) and saves it; with a stored bond we don't
+            // re-bond and the link just resumes encryption.
+            let _ = conn.set_bondable(!has_bond);
             if conn.request_security().is_err() {
                 set_status(oled, "SEC REQ ERR");
                 Timer::after_secs(1).await;
@@ -214,15 +255,22 @@ pub async fn run(
             let secured = loop {
                 match conn.next().await {
                     ConnectionEvent::PairingComplete { bond, .. } => {
-                        // Keep the bond in the stack so reconnects skip pairing.
+                        // Keep the bond in the stack and persist it to flash so
+                        // reconnects (incl. across reboots) skip pairing.
                         if let Some(b) = bond {
-                            let _ = stack.add_bond_information(b);
+                            let _ = stack.add_bond_information(b.clone());
+                            if bonds.store_item(&mut bond_buf, &(), &StoredBond(b)).await.is_ok() {
+                                has_bond = true;
+                            }
                         }
                         break true;
                     }
                     ConnectionEvent::Encrypted { .. } => break true,
                     ConnectionEvent::PairingFailed(_) => {
                         set_status(oled, "PAIR FAIL");
+                        // The peer may have forgotten us (e.g. re-paired
+                        // elsewhere); allow a fresh bond on the next attempt.
+                        has_bond = false;
                         break false;
                     }
                     ConnectionEvent::Disconnected { .. } => break false,

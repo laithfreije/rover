@@ -38,7 +38,15 @@ cyw43-pio = { version = "0.10.0" }
 # central so we can scan for, bond with, and read HID reports from an Xbox
 # controller. Pinned to a git rev: the published crate needs bt-hci 0.9, which
 # only lines up with the embassy git rev pinned in [patch.crates-io] below.
-trouble-host = { git = "https://github.com/embassy-rs/trouble.git", rev = "20e12480a3e74b757afb769797173bfc2f8f1951", features = ["scan", "security", "default-packet-pool-mtu-128"] }
+trouble-host = { git = "https://github.com/embassy-rs/trouble.git", rev = "20e12480a3e74b757afb769797173bfc2f8f1951", features = ["scan", "security", "serde", "default-packet-pool-mtu-128"] }
+
+# Bond persistence: store the BLE long-term key in the RP2040's flash so the
+# controller reconnects across reboots without re-pairing. sequential-storage
+# provides wear-levelled key/value storage over a NorFlash; the embassy-rp
+# blocking flash is adapted to the async NorFlash trait via BlockingAsync.
+embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
+sequential-storage = { version = "7.1.0", features = ["postcard"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 
 [features]
 # Default to the Bluetooth/Xbox-controller milestone. The Wi-Fi path is

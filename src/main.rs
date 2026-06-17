@@ -101,9 +101,9 @@ async fn main(spawner: Spawner) {
         } else if had_run_pin_reset {
             oled.write_text("Run Pin Reset", 0, RESET_REASON_ROW);
         } else if had_brownout_reset {
-            oled.write_text("PwrOn | BrownOut", 0, RESET_REASON_ROW);
+            oled.write_text("PwrOn|BrownOut", 0, RESET_REASON_ROW);
         } else {
-            oled.write_text("No Valid Reset Reason", 0, RESET_REASON_ROW);
+            oled.write_text("Invalid Reset Reason", 0, RESET_REASON_ROW);
         }
         oled.write_text("Connecting...", 0, IP_ROW);
     });
@@ -123,6 +123,7 @@ async fn main(spawner: Spawner) {
         p.PIO0,
         p.DMA_CH0,
         p.DMA_CH1,
+        p.FLASH,
         shared_oled,
     )
     .await;
