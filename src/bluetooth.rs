@@ -17,6 +17,7 @@ use cyw43::{aligned_bytes, Cyw43439};
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_futures::select::select3;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_23, PIN_24, PIN_25, PIN_29, PIO0};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
@@ -172,9 +173,11 @@ pub async fn run(
             // `_session` dropped here -> scanning stops, freeing the scanner.
         };
 
-        // --- Connect: hand the scanner's central back and dial the target. ---
+        // Reconnect loop: a controller will drop the link (idle, range, power),
+        // so connect/bond/stream is retried indefinitely. Within a session the
+        // bond stays in the stack's RAM, so reconnects resume encryption without
+        // re-pairing.
         let mut central = scanner.into_inner();
-        set_status(oled, "CONNECTING");
         let connect_config = ConnectConfig {
             connect_params: Default::default(),
             scan_config: ScanConfig {
@@ -184,60 +187,87 @@ pub async fn run(
                 ..Default::default()
             },
         };
-        let conn = match central.connect(&connect_config).await {
-            Ok(c) => c,
-            Err(_) => {
-                set_status(oled, "CONNECT ERR");
-                return;
-            }
-        };
-        set_status(oled, "CONNECTED");
 
-        // --- Bond: request an encrypted link. The Xbox controller pairs with
-        // Just Works (no passkey); the controller won't serve HID reports until
-        // the link is encrypted. Keep pumping events so the connection stays
-        // alive after bonding. ---
-        let _ = conn.set_bondable(true);
-        if conn.request_security().is_err() {
-            set_status(oled, "SEC REQ ERR");
-            return;
-        }
-        set_status(oled, "PAIRING...");
-        let bonded = loop {
-            match conn.next().await {
-                ConnectionEvent::PairingComplete { .. } => break true,
-                ConnectionEvent::PairingFailed(_) => {
-                    set_status(oled, "PAIR FAIL");
-                    break false;
+        loop {
+            set_status(oled, "CONNECTING");
+            let conn = match central.connect(&connect_config).await {
+                Ok(c) => c,
+                Err(_) => {
+                    set_status(oled, "CONNECT ERR");
+                    Timer::after_secs(1).await;
+                    continue;
                 }
-                ConnectionEvent::Disconnected { .. } => {
-                    set_status(oled, "DISCONNECTED");
-                    break false;
-                }
-                ConnectionEvent::RequestConnectionParams(req) => {
-                    let _ = req.accept(None, &stack).await;
-                }
-                _ => {}
-            }
-        };
-        if !bonded {
-            return;
-        }
-        set_status(oled, "BONDED");
+            };
+            set_status(oled, "CONNECTED");
 
-        // --- HID: discover the HID service, enable notifications on its input
-        // report characteristics, and dump raw report bytes. Enabling
-        // notifications is also what makes the controller consider a host
-        // "attached" (its Xbox light goes solid). ---
-        let client = match GattClient::<_, DefaultPacketPool, 10>::new(&stack, &conn).await {
-            Ok(c) => c,
-            Err(_) => {
-                set_status(oled, "GATT ERR");
-                return;
+            // Establish an encrypted link. On the first connection this performs
+            // the Just Works pairing/bond (the Xbox controller won't serve HID
+            // reports until encrypted); on a reconnect it resumes from the bond
+            // already held in RAM.
+            let _ = conn.set_bondable(true);
+            if conn.request_security().is_err() {
+                set_status(oled, "SEC REQ ERR");
+                Timer::after_secs(1).await;
+                continue;
             }
-        };
-        let _ = join(client.task(), hid_dump(&client, oled)).await;
-        set_status(oled, "HID ENDED");
+            set_status(oled, "PAIRING...");
+            let secured = loop {
+                match conn.next().await {
+                    ConnectionEvent::PairingComplete { bond, .. } => {
+                        // Keep the bond in the stack so reconnects skip pairing.
+                        if let Some(b) = bond {
+                            let _ = stack.add_bond_information(b);
+                        }
+                        break true;
+                    }
+                    ConnectionEvent::Encrypted { .. } => break true,
+                    ConnectionEvent::PairingFailed(_) => {
+                        set_status(oled, "PAIR FAIL");
+                        break false;
+                    }
+                    ConnectionEvent::Disconnected { .. } => break false,
+                    ConnectionEvent::RequestConnectionParams(req) => {
+                        let _ = req.accept(None, &stack).await;
+                    }
+                    _ => {}
+                }
+            };
+            if !secured {
+                Timer::after_secs(1).await;
+                continue;
+            }
+            set_status(oled, "BONDED");
+
+            // --- HID: discover the HID service, enable notifications on its
+            // input report characteristics, and dump raw report bytes. Three
+            // tasks run concurrently until the link drops: the GATT client task,
+            // the report listener/drawer, and a connection-event pump that
+            // accepts the controller's parameter-update requests (not doing so
+            // can get the link torn down) and detects disconnect. ---
+            let client = match GattClient::<_, DefaultPacketPool, 10>::new(&stack, &conn).await {
+                Ok(c) => c,
+                Err(_) => {
+                    set_status(oled, "GATT ERR");
+                    Timer::after_secs(1).await;
+                    continue;
+                }
+            };
+            let events = async {
+                loop {
+                    match conn.next().await {
+                        ConnectionEvent::Disconnected { .. } => break,
+                        ConnectionEvent::RequestConnectionParams(req) => {
+                            let _ = req.accept(None, &stack).await;
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            // Returns as soon as any branch ends — i.e. when the link drops.
+            select3(client.task(), hid_dump(&client, oled), events).await;
+            set_status(oled, "RECONNECTING");
+            Timer::after_millis(500).await;
+        }
     })
     .await;
 
