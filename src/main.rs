@@ -40,6 +40,8 @@ mod drivers;
 
 #[cfg(feature = "bluetooth")]
 mod bluetooth;
+#[cfg(feature = "bluetooth")]
+mod xbox;
 #[cfg(feature = "wifi")]
 mod wireless;
 

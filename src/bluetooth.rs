@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
+use crate::xbox::XboxReport;
 use crate::SharedOled;
 
 /// OLED row (8px units) where the Bluetooth connection state is drawn.
@@ -326,8 +327,9 @@ pub async fn run(
 }
 
 /// Discover the controller's HID service, enable notifications on each input
-/// report characteristic, then stream raw report bytes to the OLED. Returns
-/// when the GATT link ends (e.g. the controller disconnects).
+/// report characteristic, then decode each report and show the controller
+/// state on the OLED. Returns when the GATT link ends (e.g. the controller
+/// disconnects).
 async fn hid_dump<C: Controller>(
     client: &GattClient<'_, C, DefaultPacketPool, 10>,
     oled: &'static SharedOled,
@@ -368,7 +370,6 @@ async fn hid_dump<C: Controller>(
     };
 
     let mut last = Instant::now();
-    let mut shown_handle: Option<u16> = None;
     loop {
         let n = listener.next().await;
         let now = Instant::now();
@@ -376,29 +377,64 @@ async fn hid_dump<C: Controller>(
         if now.duration_since(last) < Duration::from_millis(REPORT_DRAW_MS) {
             continue;
         }
+        // Only the gamepad report decodes; ignore other notifications (battery,
+        // consumer control, ...).
+        let Some(report) = XboxReport::parse(n.as_ref()) else {
+            continue;
+        };
         last = now;
-
-        let handle = n.handle();
-        let data = n.as_ref();
-        oled.lock(|o| {
-            let mut o = o.borrow_mut();
-            // Label the source report handle (only when it changes).
-            if shown_handle != Some(handle) {
-                let mut hdr: String<OLED_COLS> = String::new();
-                let _ = write!(hdr, "rpt h{:04x}", handle);
-                o.clear_row(XBOX_ROW);
-                o.write_text(&hdr, 0, XBOX_ROW);
-            }
-            // First 8 bytes (the stick axes on an Xbox report) as hex.
-            let mut line: String<OLED_COLS> = String::new();
-            for b in data.iter().take(8) {
-                let _ = write!(line, "{:02x}", b);
-            }
-            o.clear_row(HID_BYTES_ROW);
-            o.write_text(&line, 0, HID_BYTES_ROW);
-        });
-        shown_handle = Some(handle);
+        draw_report(oled, &report);
     }
+}
+
+/// Append "<tok> " to `s` when `pressed`, ignoring overflow (the line is
+/// truncated rather than erroring when many buttons are held).
+fn push_btn(s: &mut String<OLED_COLS>, pressed: bool, tok: &str) {
+    if pressed {
+        let _ = s.push_str(tok);
+        let _ = s.push(' ');
+    }
+}
+
+/// Paint a decoded report across rows 4..7 with a single flush: sticks as
+/// signed percentages, triggers as 0..100, the D-pad direction, and the
+/// currently-held buttons.
+fn draw_report(oled: &'static SharedOled, r: &XboxReport) {
+    let mut sticks_l: String<OLED_COLS> = String::new();
+    let _ = write!(sticks_l, "L{:+04},{:+04}", r.lx_pct(), r.ly_pct());
+
+    let mut sticks_r: String<OLED_COLS> = String::new();
+    let _ = write!(sticks_r, "R{:+04},{:+04}", r.rx_pct(), r.ry_pct());
+
+    let mut trig: String<OLED_COLS> = String::new();
+    let _ = write!(trig, "LT{} RT{} {}", r.lt_pct(), r.rt_pct(), r.dpad.label());
+
+    let mut btns: String<OLED_COLS> = String::new();
+    push_btn(&mut btns, r.a, "A");
+    push_btn(&mut btns, r.b, "B");
+    push_btn(&mut btns, r.x, "X");
+    push_btn(&mut btns, r.y, "Y");
+    push_btn(&mut btns, r.lb, "LB");
+    push_btn(&mut btns, r.rb, "RB");
+    push_btn(&mut btns, r.menu, "Mn");
+    push_btn(&mut btns, r.view, "Vw");
+    push_btn(&mut btns, r.xbox, "Xb");
+    push_btn(&mut btns, r.ls, "LS");
+    push_btn(&mut btns, r.rs, "RS");
+    push_btn(&mut btns, r.share, "Sh");
+
+    oled.lock(|o| {
+        let mut o = o.borrow_mut();
+        o.clear_row_no_flush(HID_BYTES_ROW);
+        o.write_text_no_flush(&sticks_l, 0, HID_BYTES_ROW);
+        o.clear_row_no_flush(HID_BYTES_ROW + 1);
+        o.write_text_no_flush(&sticks_r, 0, HID_BYTES_ROW + 1);
+        o.clear_row_no_flush(HID_BYTES_ROW + 2);
+        o.write_text_no_flush(&trig, 0, HID_BYTES_ROW + 2);
+        o.clear_row_no_flush(HID_BYTES_ROW + 3);
+        o.write_text_no_flush(&btns, 0, HID_BYTES_ROW + 3);
+        o.flush();
+    });
 }
 
 /// Write a short status line on [`BT_STATUS_ROW`], clearing the row first.

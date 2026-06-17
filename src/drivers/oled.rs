@@ -46,6 +46,16 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
     }
 
     pub fn write_text(&mut self, text: &str, x: i32, y: i32) {
+        self.write_text_no_flush(text, x, y);
+        self.display.flush().unwrap();
+    }
+
+    /// Draw text without pushing the framebuffer to the panel. Pair several of
+    /// these (and [`Self::clear_row_no_flush`]) with a single [`Self::flush`] to
+    /// repaint multiple rows for the cost of one I2C transfer — the per-call
+    /// flush in [`Self::write_text`] is expensive enough to stall time-sensitive
+    /// work (e.g. the BLE runner) when done many times per second.
+    pub fn write_text_no_flush(&mut self, text: &str, x: i32, y: i32) {
         Text::with_baseline(
             text,
             Point::new(x * ROW_SIZE, y * ROW_SIZE),
@@ -54,7 +64,11 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
         )
         .draw(&mut self.display)
         .unwrap();
+    }
 
+    /// Push the framebuffer to the panel. Use after a batch of `*_no_flush`
+    /// draws.
+    pub fn flush(&mut self) {
         self.display.flush().unwrap();
     }
 
@@ -64,6 +78,13 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
     /// string can replace just one line (e.g. overwrite "Connecting" with the
     /// IP while a status row above it persists).
     pub fn clear_row(&mut self, y: i32) {
+        self.clear_row_no_flush(y);
+        self.display.flush().unwrap();
+    }
+
+    /// Like [`Self::clear_row`] but without flushing; see
+    /// [`Self::write_text_no_flush`].
+    pub fn clear_row_no_flush(&mut self, y: i32) {
         let height = IBM437_8X8_REGULAR.character_size.height;
         Rectangle::new(
             Point::new(0, y * ROW_SIZE),
@@ -72,8 +93,6 @@ impl<'a, I: embedded_hal::i2c::I2c> OLED<'a, I> {
         .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
         .draw(&mut self.display)
         .unwrap();
-
-        self.display.flush().unwrap();
     }
 
     /// Blank the whole panel. Drawing is additive (the buffered mode never
