@@ -24,13 +24,40 @@ embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "execu
 embassy-sync = { version = "0.8.0" }
 embassy-time = { version = "0.5.1" }
 embassy-rp = { version = "0.10.0", features = ["unstable-pac", "time-driver", "critical-section-impl", "rp2040"] }
-embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "proto-ipv4"] }
+embassy-futures = "0.1.2"
 
-# CYW43 wireless chip (Pico W)
-cyw43 = { version = "0.7.0" }
+# CYW43 wireless chip (Pico W). The `bluetooth` feature exposes the chip's BT
+# HCI controller, which trouble-host below drives.
+cyw43 = { version = "0.7.0", features = ["bluetooth"] }
 cyw43-pio = { version = "0.10.0" }
+
+# TrouBLE: pure-Rust BLE host stack. Drives the cyw43 BT controller as a BLE
+# central so we can scan for, bond with, and read HID reports from an Xbox
+# controller. Pinned to a git rev: the published crate needs bt-hci 0.9, which
+# only lines up with the embassy git rev pinned in [patch.crates-io] below.
+trouble-host = { git = "https://github.com/embassy-rs/trouble.git", rev = "20e12480a3e74b757afb769797173bfc2f8f1951", features = ["scan", "security", "serde", "default-packet-pool-mtu-128"] }
+
+# Bond persistence: store the BLE long-term key in the RP2040's flash so the
+# controller reconnects across reboots without re-pairing. sequential-storage
+# provides wear-levelled key/value storage over a NorFlash; the embassy-rp
+# blocking flash is adapted to the async NorFlash trait via BlockingAsync.
+embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
+sequential-storage = { version = "7.1.0", features = ["postcard"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 
 [build-dependencies]
 
 [profile.release]
 panic = "abort"
+
+# trouble-host (git HEAD) requires bt-hci 0.9, which the published cyw43 0.7.0
+# does not. The embassy git rev below ships a cyw43 that uses bt-hci 0.9; this
+# is the exact combination the trouble examples are tested against. Pinning all
+# embassy crates to the same rev keeps a single, consistent embassy in the tree.
+[patch.crates-io]
+cyw43 = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
+cyw43-pio = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
