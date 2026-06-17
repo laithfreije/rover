@@ -25,12 +25,9 @@ embassy-sync = { version = "0.8.0" }
 embassy-time = { version = "0.5.1" }
 embassy-rp = { version = "0.10.0", features = ["unstable-pac", "time-driver", "critical-section-impl", "rp2040"] }
 embassy-futures = "0.1.2"
-# Wi-Fi networking stack. Optional: only the `wifi` feature pulls it in. The
-# Bluetooth milestone (default) builds without it.
-embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "proto-ipv4"], optional = true }
 
 # CYW43 wireless chip (Pico W). The `bluetooth` feature exposes the chip's BT
-# HCI controller (used via trouble-host below) alongside Wi-Fi.
+# HCI controller, which trouble-host below drives.
 cyw43 = { version = "0.7.0", features = ["bluetooth"] }
 cyw43-pio = { version = "0.10.0" }
 
@@ -47,16 +44,6 @@ trouble-host = { git = "https://github.com/embassy-rs/trouble.git", rev = "20e12
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", rev = "1d3c3de" }
 sequential-storage = { version = "7.1.0", features = ["postcard"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
-
-[features]
-# Default to the Bluetooth/Xbox-controller milestone. The Wi-Fi path is
-# mutually exclusive for now: enabling cyw43's `bluetooth` feature changes the
-# cyw43 `Runner` type, so `wireless.rs` only compiles under a BT-less build
-# (`--no-default-features --features wifi`). Unifying the two onto a single
-# `new_with_bluetooth` bring-up is future coexistence work.
-default = ["bluetooth"]
-bluetooth = []
-wifi = ["dep:embassy-net"]
 
 [build-dependencies]
 
