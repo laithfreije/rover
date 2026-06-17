@@ -13,7 +13,7 @@
 use core::cell::Cell;
 use core::fmt::Write as _;
 
-use cyw43::{aligned_bytes, Cyw43439};
+use cyw43::{aligned_bytes, Control, Cyw43439};
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use embassy_embedded_hal::adapter::BlockingAsync;
 use embassy_executor::Spawner;
@@ -26,6 +26,7 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::{bind_interrupts, dma, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
+use embassy_sync::watch::Watch;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use heapless::String;
 use sequential_storage::cache::NoCache;
@@ -86,11 +87,38 @@ bind_interrupts!(struct Irqs {
 /// Bluetooth traffic to make progress. With the `bluetooth` feature enabled the
 /// runner carries a third type parameter (`Cyw43439`) versus the Wi-Fi-only
 /// build.
+/// Max simultaneous subscribers to [`CONTROLLER`].
+const CONTROLLER_RECEIVERS: usize = 4;
+
+/// Latest decoded controller state, published by the HID stream at full report
+/// rate. Application tasks subscribe with `CONTROLLER.receiver()` and await
+/// `changed()` to react to input. Latest-wins: a slow consumer simply sees the
+/// most recent state rather than a backlog.
+pub static CONTROLLER: Watch<CriticalSectionRawMutex, XboxReport, CONTROLLER_RECEIVERS> = Watch::new();
+
 #[embassy_executor::task]
 async fn cyw43_task(
     runner: cyw43::Runner<'static, cyw43::SpiBus<Output<'static>, PioSpi<'static, PIO0, 0>>, Cyw43439>,
 ) -> ! {
     runner.run().await
+}
+
+/// Demo consumer of [`CONTROLLER`]: mirror the A button on the Pico W's onboard
+/// LED (cyw43 GPIO 0). Shows how application code reacts to controller input
+/// from its own task; replace with real logic.
+#[embassy_executor::task]
+async fn controller_led_task(mut control: Control<'static>) {
+    let Some(mut rx) = CONTROLLER.receiver() else {
+        return;
+    };
+    let mut led = false;
+    loop {
+        let report = rx.changed().await;
+        if report.a != led {
+            led = report.a;
+            control.gpio_set(0, led).await;
+        }
+    }
 }
 
 /// Persisted bond record. `BondInformation` (peer identity + long-term key) is
@@ -143,6 +171,9 @@ pub async fn run(
         cyw43::new_with_bluetooth(state, pwr, spi, fw, btfw, nvram).await;
     spawner.spawn(cyw43_task(cyw43_runner).unwrap());
     control.init(clm).await;
+
+    // Hand the cyw43 control to a demo task that reacts to controller input.
+    spawner.spawn(controller_led_task(control).unwrap());
 
     let controller: ExternalController<_, 10> = ExternalController::new(bt_device);
 
@@ -369,19 +400,23 @@ async fn hid_dump<C: Controller>(
         Err(_) => return set_status(oled, "LISTEN ERR"),
     };
 
+    let tx = CONTROLLER.sender();
     let mut last = Instant::now();
     loop {
         let n = listener.next().await;
-        let now = Instant::now();
-        // Drain quickly; repaint at most every REPORT_DRAW_MS.
-        if now.duration_since(last) < Duration::from_millis(REPORT_DRAW_MS) {
-            continue;
-        }
         // Only the gamepad report decodes; ignore other notifications (battery,
         // consumer control, ...).
         let Some(report) = XboxReport::parse(n.as_ref()) else {
             continue;
         };
+        // Publish every report so subscribers get the full rate; the OLED
+        // (below) is the only throttled consumer.
+        tx.send(report);
+
+        let now = Instant::now();
+        if now.duration_since(last) < Duration::from_millis(REPORT_DRAW_MS) {
+            continue;
+        }
         last = now;
         draw_report(oled, &report);
     }
