@@ -38,6 +38,7 @@ use crate::drivers::oled::OLED;
 
 mod bluetooth;
 mod drivers;
+mod motor;
 mod xbox;
 
 const RESET_REASON_ROW: i32 = 0;
@@ -65,11 +66,11 @@ async fn power_task(oled: &'static SharedOled) -> ! {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-    // OLED on I2C0: SDA = GPIO16, SCL = GPIO17. The bus lives in a RefCell so
-    // the ssd1306 driver can share it via embedded-hal-bus. Both the bus and
-    // the OLED are promoted to 'static (via StaticCell) so power_task can hold
-    // a &'static reference to the shared display.
-    let i2c_bus = I2c::new_blocking(p.I2C0, p.PIN_17, p.PIN_16, i2c::Config::default());
+    // OLED on I2C0: SDA = GPIO8, SCL = GPIO9 (GPIO16/17 are now the motor PWM
+    // pins). The bus lives in a RefCell so the ssd1306 driver can share it via
+    // embedded-hal-bus. Both the bus and the OLED are promoted to 'static (via
+    // StaticCell) so power_task can hold a &'static reference to the display.
+    let i2c_bus = I2c::new_blocking(p.I2C0, p.PIN_9, p.PIN_8, i2c::Config::default());
     static I2C_CELL: StaticCell<RefCell<I2c<'static, I2C0, Blocking>>> = StaticCell::new();
     let refcell_i2c = I2C_CELL.init(RefCell::new(i2c_bus));
     let oled = OLED::new(refcell_i2c);
@@ -106,6 +107,21 @@ async fn main(spawner: Spawner) {
     });
 
     spawner.spawn(power_task(shared_oled).unwrap());
+
+    // Motors: TB6612FNG on PWMA=GP16, PWMB=GP17 (PWM slice 0), AI1=GP21,
+    // AI2=GP22, BI1=GP19, BI2=GP18, STBY=GP20. The drive task reacts to the
+    // shared controller state and halts on signal loss.
+    let motors = motor::MotorController::init(
+        p.PWM_SLICE0,
+        p.PIN_16,
+        p.PIN_17,
+        p.PIN_21,
+        p.PIN_22,
+        p.PIN_19,
+        p.PIN_18,
+        p.PIN_20,
+    );
+    spawner.spawn(motor::drive_task(motors).unwrap());
 
     // Bring up the cyw43 chip's Bluetooth and run the controller link forever.
     bluetooth::run(

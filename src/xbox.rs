@@ -93,6 +93,32 @@ pub struct XboxReport {
 }
 
 impl XboxReport {
+    /// All-neutral state: sticks centred, triggers released, no buttons. Used
+    /// to force consumers (e.g. the motors) to a safe state on disconnect.
+    pub fn neutral() -> Self {
+        Self {
+            lx: 32768,
+            ly: 32768,
+            rx: 32768,
+            ry: 32768,
+            lt: 0,
+            rt: 0,
+            dpad: Dpad::None,
+            a: false,
+            b: false,
+            x: false,
+            y: false,
+            lb: false,
+            rb: false,
+            view: false,
+            menu: false,
+            xbox: false,
+            ls: false,
+            rs: false,
+            share: false,
+        }
+    }
+
     /// Decode a HID input report. Tolerates an optional leading report-id byte
     /// (the report body is taken as the last [`BODY_LEN`] bytes). Returns `None`
     /// if the slice is too short to be a gamepad report.

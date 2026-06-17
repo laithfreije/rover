@@ -345,6 +345,9 @@ pub async fn run(
             };
             // Returns as soon as any branch ends — i.e. when the link drops.
             select3(client.task(), hid_dump(&client, oled), events).await;
+            // Push a neutral state so consumers (motors!) stop immediately,
+            // rather than waiting for their own failsafe timeout.
+            CONTROLLER.sender().send(XboxReport::neutral());
             set_status(oled, "RECONNECTING");
             Timer::after_millis(500).await;
         }
