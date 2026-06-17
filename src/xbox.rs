@@ -127,18 +127,21 @@ impl XboxReport {
         })
     }
 
-    /// Left/right stick axes as a signed percentage, -100..100 (centre = 0).
+    /// Stick axes as a signed percentage, -100..100 (centre = 0), using the
+    /// intuitive joystick convention: right is +X and **up is +Y**. (The raw
+    /// `ly`/`ry` fields keep the HID orientation, where Y grows downward, so the
+    /// Y helpers negate it.)
     pub fn lx_pct(&self) -> i32 {
         axis_pct(self.lx)
     }
     pub fn ly_pct(&self) -> i32 {
-        axis_pct(self.ly)
+        -axis_pct(self.ly)
     }
     pub fn rx_pct(&self) -> i32 {
         axis_pct(self.rx)
     }
     pub fn ry_pct(&self) -> i32 {
-        axis_pct(self.ry)
+        -axis_pct(self.ry)
     }
 
     /// Triggers as a percentage, 0..100.
