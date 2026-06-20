@@ -39,6 +39,7 @@ use crate::drivers::oled::OLED;
 mod bluetooth;
 mod drivers;
 mod motor;
+mod servo;
 mod xbox;
 
 const RESET_REASON_ROW: i32 = 0;
@@ -70,7 +71,12 @@ async fn main(spawner: Spawner) {
     // pins). The bus lives in a RefCell so the ssd1306 driver can share it via
     // embedded-hal-bus. Both the bus and the OLED are promoted to 'static (via
     // StaticCell) so power_task can hold a &'static reference to the display.
-    let i2c_bus = I2c::new_blocking(p.I2C0, p.PIN_9, p.PIN_8, i2c::Config::default());
+    // 400 kHz (fast mode): the OLED flush is blocking and shares the executor
+    // with the BLE stack, so a slower bus stalls report processing. 4x the
+    // default 100 kHz cuts each flush to ~quarter the time.
+    let mut i2c_config = i2c::Config::default();
+    i2c_config.frequency = 400_000;
+    let i2c_bus = I2c::new_blocking(p.I2C0, p.PIN_9, p.PIN_8, i2c_config);
     static I2C_CELL: StaticCell<RefCell<I2c<'static, I2C0, Blocking>>> = StaticCell::new();
     let refcell_i2c = I2C_CELL.init(RefCell::new(i2c_bus));
     let oled = OLED::new(refcell_i2c);
@@ -122,6 +128,12 @@ async fn main(spawner: Spawner) {
         p.PIN_20,
     );
     spawner.spawn(motor::drive_task(motors).unwrap());
+
+    // SG90 servo on GP2 (PWM slice 1, channel A — independent of the motors'
+    // slice 0). The task steers it from the right stick X axis and recentres on
+    // signal loss.
+    let servo = servo::Servo::init(p.PWM_SLICE1, p.PIN_2);
+    spawner.spawn(servo::servo_task(servo).unwrap());
 
     // Bring up the cyw43 chip's Bluetooth and run the controller link forever.
     bluetooth::run(

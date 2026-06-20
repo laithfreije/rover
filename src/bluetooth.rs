@@ -27,7 +27,7 @@ use embassy_rp::{bind_interrupts, dma, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Watch;
-use embassy_time::{with_timeout, Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use heapless::String;
 use sequential_storage::cache::NoCache;
 use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
@@ -56,6 +56,32 @@ const L2CAP_CHANNELS_MAX: usize = 3;
 /// mode and advertising).
 const DISCOVER_TIMEOUT_SECS: u64 = 30;
 
+/// Connection parameters we drive the link to. Left to its own devices, an Xbox
+/// controller requests a long, power-saving connection interval; the radio then
+/// buffers input reports and delivers them in bursts (you flick the stick
+/// left-right and nothing happens for seconds, then both reports arrive at
+/// once). Pinning a tight interval with zero peripheral latency keeps input
+/// low-latency. We use this both for the initial connect and to counter the
+/// controller's update requests instead of accepting whatever (slow) interval
+/// it asks for.
+///
+/// The floor is 15 ms (the Xbox controller's own active rate), not the 7.5 ms
+/// BLE minimum: 7.5 ms proved unstable on the cyw43 under sustained traffic
+/// (the link dropped while actively streaming). 15–30 ms is still 7–13x faster
+/// than the controller's idle default and comfortably responsive, and the 4 s
+/// supervision timeout tolerates transient packet loss before the link is
+/// declared dead.
+fn fast_conn_params() -> RequestedConnParams {
+    RequestedConnParams {
+        min_connection_interval: Duration::from_millis(15),
+        max_connection_interval: Duration::from_millis(30),
+        max_latency: 0,
+        min_event_length: Duration::from_micros(0),
+        max_event_length: Duration::from_micros(0),
+        supervision_timeout: Duration::from_secs(4),
+    }
+}
+
 /// Total RP2040/Pico W flash size.
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 /// Bytes reserved at the end of flash for bond storage. Must be a multiple of
@@ -76,6 +102,7 @@ const HID_BYTES_ROW: i32 = 4;
 /// faster than the (whole-framebuffer-flushing, blocking-I2C) panel can
 /// repaint, and a long flush stalls the BLE runner — so we drain every
 /// notification promptly but only repaint a few times a second.
+#[allow(dead_code)]
 const REPORT_DRAW_MS: u64 = 200;
 
 bind_interrupts!(struct Irqs {
@@ -174,6 +201,8 @@ pub async fn run(
 
     // Hand the cyw43 control to a demo task that reacts to controller input.
     spawner.spawn(controller_led_task(control).unwrap());
+    // Repaint the controller state on the OLED off the HID hot path.
+    spawner.spawn(controller_display_task(oled).unwrap());
 
     let controller: ExternalController<_, 10> = ExternalController::new(bt_device);
 
@@ -252,7 +281,7 @@ pub async fn run(
         // re-pairing.
         let mut central = scanner.into_inner();
         let connect_config = ConnectConfig {
-            connect_params: Default::default(),
+            connect_params: fast_conn_params(),
             scan_config: ScanConfig {
                 active: true,
                 filter_accept_list: core::slice::from_ref(&target),
@@ -307,7 +336,9 @@ pub async fn run(
                     }
                     ConnectionEvent::Disconnected { .. } => break false,
                     ConnectionEvent::RequestConnectionParams(req) => {
-                        let _ = req.accept(None, &stack).await;
+                        // Counter with our fast params rather than rubber-
+                        // stamping the controller's slow, bursty request.
+                        let _ = req.accept(Some(&fast_conn_params()), &stack).await;
                     }
                     _ => {}
                 }
@@ -317,6 +348,12 @@ pub async fn run(
                 continue;
             }
             set_status(oled, "BONDED");
+
+            // As central, proactively drive the connection interval down: the
+            // controller defaults to a slow (~200 ms) interval, and only
+            // reacting to its update requests doesn't stick, so force our fast
+            // params. The peripheral must follow a central-initiated update.
+            let _ = conn.update_connection_params(&stack, &fast_conn_params()).await;
 
             // --- HID: discover the HID service, enable notifications on its
             // input report characteristics, and dump raw report bytes. Three
@@ -337,7 +374,9 @@ pub async fn run(
                     match conn.next().await {
                         ConnectionEvent::Disconnected { .. } => break,
                         ConnectionEvent::RequestConnectionParams(req) => {
-                            let _ = req.accept(None, &stack).await;
+                            // Counter with our fast params rather than rubber-
+                            // stamping the controller's slow, bursty request.
+                            let _ = req.accept(Some(&fast_conn_params()), &stack).await;
                         }
                         _ => {}
                     }
@@ -404,7 +443,6 @@ async fn hid_dump<C: Controller>(
     };
 
     let tx = CONTROLLER.sender();
-    let mut last = Instant::now();
     loop {
         let n = listener.next().await;
         // Only the gamepad report decodes; ignore other notifications (battery,
@@ -412,16 +450,11 @@ async fn hid_dump<C: Controller>(
         let Some(report) = XboxReport::parse(n.as_ref()) else {
             continue;
         };
-        // Publish every report so subscribers get the full rate; the OLED
-        // (below) is the only throttled consumer.
+        // Publish every report so subscribers get the full rate. This loop does
+        // no blocking work (no I2C): at the ~15 ms report rate a blocking OLED
+        // flush here lets notifications back up faster than we drain them, so
+        // the display is repainted off-path by `controller_display_task`.
         tx.send(report);
-
-        let now = Instant::now();
-        if now.duration_since(last) < Duration::from_millis(REPORT_DRAW_MS) {
-            continue;
-        }
-        last = now;
-        draw_report(oled, &report);
     }
 }
 
@@ -431,6 +464,25 @@ fn push_btn(s: &mut String<OLED_COLS>, pressed: bool, tok: &str) {
     if pressed {
         let _ = s.push_str(tok);
         let _ = s.push(' ');
+    }
+}
+
+/// Throttled OLED renderer for the controller state. Subscribes to
+/// [`CONTROLLER`] and repaints at most every [`REPORT_DRAW_MS`], deliberately
+/// off the HID hot path: the OLED flush is blocking I2C, and at the ~15 ms
+/// report rate a flush in the report loop lets notifications back up faster than
+/// they drain. Coalesces intermediate updates (latest-wins) via the throttle.
+#[embassy_executor::task]
+pub async fn controller_display_task(oled: &'static SharedOled) {
+    let Some(mut rx) = CONTROLLER.receiver() else {
+        return;
+    };
+    loop {
+        let report = rx.changed().await;
+        draw_report(oled, &report);
+        // Ignore further updates for a bit so the slow panel isn't asked to
+        // repaint faster than it can; the next `changed()` returns the latest.
+        Timer::after_millis(REPORT_DRAW_MS).await;
     }
 }
 
